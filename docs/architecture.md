@@ -14,7 +14,7 @@ flowchart LR
             SM["상태 머신<br/>Mission.step()"]
             YW["YOLO webcam_model<br/>yolo8n_best.pt"]
             YR["YOLO robot_model<br/>yolo8n_merged_dataset_best.pt"]
-            TFB["tf2_ros.Buffer<br/>+ TransformListener"]
+            TFB["tf2_ros.Buffer<br/>+ TransformListener (전용 노드/스레드)"]
         end
         FILES[("~/maps/webcam_H.npy<br/>~/maps/my_map.yaml/.pgm<br/>*.pt")]
         RVIZ["rviz2<br/>ROS_SUPER_CLIENT=True"]
@@ -236,7 +236,7 @@ flowchart LR
 | `webcam` | `cv2.VideoCapture` | | `__init__` | `do_wait_car` | BUFFERSIZE 1 |
 | `webcam_model`, `robot_model` | `ultralytics.YOLO` | | `__init__` | `do_wait_car`, `robot_frame` | 클래스 `{0:'car', 1:'dummy'}` |
 | `tf_buffer` | `tf2_ros.Buffer` | | `__init__` | `car_in_map` | 기본 캐시 10s |
-| `tf_listener` | `tf2_ros.TransformListener` | | `__init__` | | `/tf`, `/tf_static` 구독 |
+| `tf_listener` | `tf2_ros.TransformListener` (`spin_thread=True`) | | `__init__` | | 전용 내부 노드 + 스레드에서 `/tf`, `/tf_static` 구독 (메인 루프와 무관하게 버퍼 갱신) |
 | `rgb_msg` | `CompressedImage \| None` | | `rgb_callback` | `robot_frame` (꺼내고 None) | 미처리 최신 rgb |
 | `rgb_stamp` | `float` | s | `robot_frame` | `box_depth` | 처리 중 rgb stamp |
 | `depth_mm` | `np.ndarray uint16 (704,704) \| None` | mm | `depth_callback` | `box_depth` | 최신 depth |

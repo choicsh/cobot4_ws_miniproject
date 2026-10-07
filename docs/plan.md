@@ -66,6 +66,7 @@ FIND      -> 마지막으로 본 방향으로 제자리 회전, T초 안에 다�
   - Nav2 `xy_goal_tolerance`를 0.25 → 0.1로 낮춘 `config/nav2.yaml`을 쓴다. 0.25면 10cm 옮긴 goal이 바로 도착 처리되어 로봇이 움직이지 않는다
   - TF 시각은 bbox를 만든 **rgb가 찍힌 시각**. 최신 TF(`Time()`)를 썼을 때 회전 중 영상 지연(0.2~0.4s)만큼 차 좌표가 좌우로 ±40cm 튀어, 가짜 이동 → goal 재전송 → 회전이 반복됐다 (실측). 과거 시각이라 TF가 버퍼에 있어 `spin_once` 루프에서도 대기 없이 조회된다. 없으면(extrapolation) 그 프레임은 건너뜀
   - 단 `map ← odom`은 **최신 값**. amcl이 scan을 버리며(scan 7.4Hz, map→odom 2.8Hz) 수 초씩 발행을 멈춰 rgb 시각의 체인 조회가 extrapolation으로 실패했다 (실측 3.4s). map→odom은 천천히 변하는 보정값이라 최신 값으로 충분하고, 빠르게 변하는 odom ← 카메라만 rgb 시각으로 조회한다 (`fixed_frame='odom'`)
+  - TransformListener는 `spin_thread=True`(전용 내부 노드 + 스레드)로 TF를 받는다. 메인 루프에서 받으면 YOLO 사이에 1개씩 처리되어 버퍼가 늦어 extrapolation 실패가 잦았다 (실측)
   - TransformListener는 절대 토픽 `/tf`를 구독하므로 `main()`의 `rclpy.init`에서 `/tf:=/robot5/tf`, `/tf_static:=/robot5/tf_static`으로 remap
   - rgb와 depth 모두 **704x704**로, **rgb가 depth(stereo) 기준으로** OAK-D 내부에서 align되어 있다 (`align_check.py`, camera_info로 확인함). 그래서 K는 stereo의 것을 쓴다. bbox 픽셀 좌표를 depth에 그대로 쓴다. 크기가 다르면 에러를 내고 해당 프레임은 건너뛴다.
   - cmd_vel은 `geometry_msgs/TwistStamped`, 토픽은 `/robot5/cmd_vel` (FIND 제자리 회전에서만 사용)

@@ -141,7 +141,9 @@ class Mission:
         self.webcam_model = YOLO(WEBCAM_MODEL)
         self.robot_model = YOLO(ROBOT_MODEL)
         self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, n)  # /tf -> /robot5/tf remap은 main()
+        # 전용 내부 노드 + 스레드로 TF 수신: 메인 루프(spin_once 1회 1콜백, YOLO 사이)에서 받으면 버퍼가 늦게 쌓여
+        # rgb 시각 조회가 extrapolation으로 자주 실패함 (실측). /tf -> /robot5/tf remap은 main()의 전역 인자로 적용
+        self.tf_listener = TransformListener(self.tf_buffer, None, spin_thread=True)
 
         self.rgb_msg = None
         self.depth_mm = None
