@@ -68,6 +68,7 @@ flowchart LR
 | sub | `/robot5/initialpose` | `geometry_msgs/msg/PoseWithCovarianceStamped` | system default | rviz 입력 시 | (navigator 내부) | navigator `_poseEstimateCallback` |
 | sub | `/robot5/tf` (← `/tf` remap) | `tf2_msgs/msg/TFMessage` | tf2 기본 (RELIABLE, VOLATILE, depth 100) | (미확인) | TRACK | `TransformListener` |
 | sub | `/robot5/tf_static` (← `/tf_static` remap) | `tf2_msgs/msg/TFMessage` | TRANSIENT_LOCAL | 1회 | TRACK | `TransformListener` |
+| pub | `/robot5/goal_update` | `geometry_msgs/msg/PoseStamped` (frame `map`, 차 위치, yaw = 카메라→차) | depth 10 | TRACK 유효 프레임마다 (~8Hz) | TRACK | `follow_car` → bt_navigator `GoalUpdater` |
 | pub | `/robot5/cmd_vel` | `geometry_msgs/msg/TwistStamped` (frame `base_link`) | RELIABLE, depth 10 | FIND 동안 루프마다 | FIND, FIND→TRACK 정지, 종료 시 정지 | `publish()` |
 | pub | `/robot5/initialpose` | `geometry_msgs/msg/PoseWithCovarianceStamped` (frame `map`) | depth 10 | 1회 | UNDOCK | `nav.setInitialPose()` |
 
@@ -79,7 +80,7 @@ flowchart LR
 | 종류 | 이름 | 타입 | 호출 | blocking |
 |---|---|---|---|---|
 | action | `/robot5/undock` | `irobot_create_msgs/action/Undock` | `nav.undock()` (UNDOCK) | 완료까지 (sleep 0.1s 폴링) |
-| action | `/robot5/navigate_to_pose` | `nav2_msgs/action/NavigateToPose` | `nav.goToPose(PoseStamped)` (NAVIGATE, TRACK) | goal 수락까지 (`spin_until_future_complete`) |
+| action | `/robot5/navigate_to_pose` | `nav2_msgs/action/NavigateToPose` | NAVIGATE: `nav.goToPose(PoseStamped)` / TRACK: `nav.goToPose(차 pose, behavior_tree=config/follow_car.xml)` 1회 | goal 수락까지 (`spin_until_future_complete`) |
 | action | 〃 cancel | `action_msgs/srv/CancelGoal` | `nav.cancelTask()` (FIND 진입, 종료) | 취소 응답까지 |
 | action | 〃 result | `NavigateToPose.Result` | `nav.isTaskComplete()` (NAVIGATING) | 최대 0.10s |
 | service | `/robot5/amcl/get_state`, `/robot5/bt_navigator/get_state` | `lifecycle_msgs/srv/GetState` | `nav.waitUntilNav2Active()` (LOCALIZE) | active까지 |
@@ -97,7 +98,7 @@ stateDiagram-v2
     NAVIGATE --> NAVIGATING: goToPose(visible_goal 또는 approach_goal)
     NAVIGATING --> TRACK: robot cam car 5/10
     NAVIGATING --> FIND: isTaskComplete() and 안 보임
-    TRACK --> TRACK: 유효 프레임마다 goToPose 재전송
+    TRACK --> TRACK: follow action 1회 + 유효 프레임마다 goal_update 토픽
     TRACK --> FIND: LOST_SEC 0.7s 안 보임, cancelTask()
     FIND --> TRACK: robot cam car 5/10, cmd_vel 0
     FIND --> WAIT_CAR: FIND_SEC 경과, cmd_vel 0
@@ -160,10 +161,13 @@ flowchart TD
     P --> PS["geometry_msgs/PointStamped<br/>point.x/y/z: float64"]
     PS --> T["do_transform_point(pt, tf).point<br/>car_xy: tuple[float,float] map [m]"]
     TF0 --> CAM["tf.transform.translation<br/>cam_xy: tuple[float,float] map [m]"]
-    T --> AG["approach_goal(cam_xy, car_xy, TRACK_DIST 1.0)<br/>-> (x: float, y: float [m], yaw: float [rad])"]
-    CAM --> AG
-    AG --> PO["nav.getPoseStamped([x,y], degrees(yaw))<br/>geometry_msgs/PoseStamped, frame 'map'<br/>orientation z=sin(yaw/2), w=cos(yaw/2)"]
-    PO --> GO["nav.goToPose(pose)<br/>nav2_msgs/action/NavigateToPose<br/>유효 프레임마다 (~8Hz)"]
+    T --> PO["follow_car: nav.getPoseStamped(car_xy, yaw = 카메라→차)<br/>geometry_msgs/PoseStamped, frame 'map'"]
+    CAM --> PO
+    PO --> FQ{"follow action 실행 중?<br/>(FOLLOW_CHECK_SEC 1s마다 isTaskComplete 확인)"}
+    FQ -- no --> GO["nav.goToPose(pose, behavior_tree=follow_car.xml)<br/>NavigateToPose action 1회"]
+    FQ -- yes --> GU["goal_pub.publish(pose)<br/>/robot5/goal_update 토픽 (~8Hz, 대기 없음)"]
+    GU --> BT["bt_navigator: GoalUpdater → 4Hz ComputePathToPose<br/>→ TruncatePath 1.0m → FollowPath (끊기지 않음)"]
+    GO --> BT
 ```
 
 ### 4.4 기타 변환
@@ -199,7 +203,11 @@ sequenceDiagram
         else TRACK
             M->>M: robot_frame() + car_in_map()
             opt depth/TF 유효
-                M->>N: goToPose() (수락까지 blocking, 프레임마다)
+                alt follow action 없음
+                    M->>N: goToPose(follow_car.xml) (수락까지 blocking, 1회)
+                else 실행 중
+                    M->>N: publish goal_update (대기 없음)
+                end
             end
         else FIND
             M->>M: robot_frame() + publish(cmd_vel)
@@ -251,6 +259,7 @@ flowchart LR
 | `webcam_win` | `deque[np.ndarray \| None]` (maxlen 10) | m | `do_wait_car` | `do_wait_car` | K-of-N |
 | `robot_win` | `deque[list[float] \| None]` (maxlen 10) | px | `robot_frame` | `robot_seen` | K-of-N |
 | `raw_dist` | `float` | m | `box_depth` | `do_track` 로그 | stamp 검사 전 depth |
+| `following`, `follow_check` | `bool`, `float` (`time.monotonic`) | s | `follow_car`, `set_state` | `follow_car` | TRACK follow action 실행 중 여부, 마지막 종료 확인 시각 |
 | `last_seen` | `float` (`time.monotonic`) | s | `do_navigating`, `do_track`, `do_find` | `do_track` | 마지막 감지 시각 |
 | `last_dir` | `float` (±1.0) | | `do_track` | `do_find` | FIND 회전 방향 (+ = 왼쪽) |
 | `find_start` | `float` (`time.monotonic`) | s | `start_find` | `do_find` | FIND 시작 시각 |
@@ -272,7 +281,9 @@ flowchart LR
 | `VIS_RADII` | (1.0, 0.8, 0.6, 0.4) | m | visible_goal 후보 원 반경 (먼 것부터). 0.4 = 로봇 반경 + 차 반폭 + 여유 | O |
 | `VIS_STEP_DEG` | 15 | deg | visible_goal 후보 간격 | O |
 | `VIS_CLEARANCE` | 0.3 | m | visible_goal 후보 주변 벽/unknown 금지 반경 (로봇 반경 0.19 + 여유) | O |
-| `TRACK_DIST` | 1.0 | m | TRACK goal을 차(가까운 표면) 앞 몇 m에 둘지, VIS_RADII 첫 반경. 카메라 0.8m 안쪽은 차가 잘림 | O |
+| `TRACK_DIST` | 1.0 | m | TRACK에서 차 앞 거리 (실제 값은 follow_car.xml TruncatePath, 같게 유지), VIS_RADII 첫 반경. 카메라 0.8m 안쪽은 차가 잘림 | O |
+| `FOLLOW_BT` | `~/cobot4_ws_miniproject/config/follow_car.xml` | | TRACK follow action BT (RateController 4Hz, TruncatePath 1.0m) | O (hz) |
+| `FOLLOW_CHECK_SEC` | 1.0 | s | follow action 종료(실패) 확인 주기 | |
 | `LOST_SEC` | 0.7 | s | 못 보면 FIND | O |
 | `MAX_DEPTH_MM` | 4000 | mm | TRACK depth ROI에서 이 이상(먼 벽/배경) 제외 | O |
 | `SYNC_SLOP` | 0.05 | s | rgb-depth 짝 맞춤 허용 stamp 차이 (실측 짝 차이 ≤ 31ms) | |

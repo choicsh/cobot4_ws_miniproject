@@ -132,18 +132,21 @@ MAX_V, MAX_W = 0.26, 1.0          # config/nav2.yaml DWB max_vel_x, max_vel_thet
 XY_TOL, YAW_TOL = 0.1, 0.25       # config/nav2.yaml goal tolerance
 HFOV = math.atan(352 / 500)       # K 기준 반화각 (~35deg)
 PERCEPT_HZ, LATENCY = 8.0, 0.12   # rgb-depth 짝 처리 주기, 처리 지연 (실측)
+REPLAN_HZ = 4.0                   # config/follow_car.xml RateController hz
 NEAR, FAR = 0.8, 4.0              # 0.8m 안쪽은 차가 화면 하단에 잘림 (실측), 4m 이상은 depth 필터
 
 
 def simulate(car_at, t_end, robot=(0.0, 0.0, 0.0), noise=0.03, seed=0):
     """car_at(t) -> (x, y). 반환: 시각, 로봇-차 거리 배열, 놓친 횟수 (LOST_SEC 이상 미감지).
 
+    TRACK = follow_car.xml 근사: 차 측정(PERCEPT_HZ, LATENCY 전 위치 + 노이즈)은 goal_update로만 들어가고,
+    REPLAN_HZ마다 로봇->차 직선 경로를 TRACK_DIST만큼 잘라 끝점을 goal로 (approach_goal과 같은 점).
     로봇 = Nav2 근사: goal 방향으로 회전(MAX_W), 방향 오차 0.5rad 안이면 전진(MAX_V, 비례 감속),
-    XY_TOL 안이면 goal yaw로 회전만. 후진 없음. 차 측정 = LATENCY 전 위치 + 가우시안 노이즈.
+    XY_TOL 안이면 goal yaw로 회전만. 후진 없음.
     """
     rnd = np.random.default_rng(seed)
     x, y, th = robot
-    dt, goal, last_seen, next_p = 0.02, None, 0.0, 0.0
+    dt, goal, meas, last_seen, next_p, next_r = 0.02, None, None, 0.0, 0.0, 0.0
     ts, dists, lost, was_lost = [], [], 0, False
     for t in np.arange(0.0, t_end, dt):
         if t >= next_p:
@@ -152,10 +155,12 @@ def simulate(car_at, t_end, robot=(0.0, 0.0, 0.0), noise=0.03, seed=0):
             d, b = math.hypot(cx - x, cy - y), math.atan2(cy - y, cx - x) - th
             if NEAR <= d <= FAR and abs(math.atan2(math.sin(b), math.cos(b))) < HFOV:
                 meas = (cx + rnd.normal(0, noise), cy + rnd.normal(0, noise))
-                goal = approach_goal((x, y), meas, TRACK_DIST)
                 last_seen, was_lost = t, False
             elif t - last_seen > LOST_SEC and not was_lost:
                 lost, was_lost = lost + 1, True
+        if meas is not None and t >= next_r:  # RateController: 최신 goal_update로 경로 재계산 + TruncatePath
+            next_r += 1 / REPLAN_HZ
+            goal = approach_goal((x, y), meas, TRACK_DIST)
         if goal is not None:
             gx, gy, gyaw = goal
             dist = math.hypot(gx - x, gy - y)

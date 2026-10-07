@@ -10,7 +10,7 @@ from rclpy.qos import qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
 from message_filters import ApproximateTimeSynchronizer, Subscriber
-from geometry_msgs.msg import PointStamped, PoseWithCovarianceStamped, TwistStamped
+from geometry_msgs.msg import PointStamped, PoseStamped, PoseWithCovarianceStamped, TwistStamped
 from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import CameraInfo, CompressedImage
 from tf2_geometry_msgs import do_transform_point
@@ -37,6 +37,10 @@ ROBOT_N, ROBOT_K = 10, 5    # 로봇 카메라: NAVIGATING/FIND에서 최근 N�
 APPROACH_DIST = 0.5       # NAVIGATE: webcam 좌표 기준 차 앞 몇 m를 GOAL로. 1.4m에서는 벽 너머라 차가 안 보인 채 도착 (실측).
 #                           0.1m는 webcam 오차(10~15cm)·로봇 반경(0.19m)보다 작아 차에 닿을 수 있어 0.5m로
 TRACK_DIST = 1.0          # TRACK: 차(가까운 표면) 앞 몇 m를 GOAL로. 카메라 0.8m 안쪽은 차가 화면 하단에 잘림 (실측)
+#                           TRACK은 FOLLOW_BT의 TruncatePath distance가 실제 값 (같게 유지), visible_goal 반경에도 사용
+# TRACK용 Nav2 BT: follow_point.xml(hz 4). action은 한 번만, 이후 차 위치는 goal_update 토픽으로 갱신
+FOLLOW_BT = os.path.expanduser('~/cobot4_ws_miniproject/config/follow_car.xml')
+FOLLOW_CHECK_SEC = 1.0    # TRACK: follow action이 끝났는지(실패) 확인 주기. isTaskComplete가 최대 0.1s 막음
 VIS_RADII = (TRACK_DIST, 0.8, 0.6, 0.4)  # NAVIGATE: 차 주위 후보 원 반경, 먼 것부터 (m). 0.4 = 로봇 반경 + 차 반폭 + 여유
 VIS_STEP_DEG = 15         # NAVIGATE: 후보 원 위 간격 (deg)
 VIS_CLEARANCE = 0.3       # NAVIGATE: 후보 주변 이 반경(m) 안에 벽/unknown 있으면 제외 (로봇 반경 0.19 + 여유)
@@ -124,6 +128,7 @@ class Mission:
         n = self.nav
         # 네임스페이스 상대 토픽 -> /robot5/...
         self.cmd_pub = n.create_publisher(TwistStamped, 'cmd_vel', 10)
+        self.goal_pub = n.create_publisher(PoseStamped, 'goal_update', 10)  # follow_car.xml GoalUpdater 입력
         # rgb(26Hz, 도착 ~0.06s)와 depth(8Hz, 도착 ~0.13s)를 stamp로 짝지어 depth가 도착할 때 같이 처리 (실측).
         # 최신 rgb를 바로 쓰면 그 시각의 depth/odom TF가 아직 없어 프레임 대부분을 버렸음. 감지도 짝 기준 ~8Hz
         self.rgb_sub = Subscriber(n, CompressedImage, 'oakd/rgb/image_raw/compressed',
@@ -163,6 +168,8 @@ class Mission:
         self.robot_win = deque(maxlen=ROBOT_N)    # 프레임마다 car bbox 또는 None
         self.raw_dist = 0.0
         self.last_seen = 0.0
+        self.following = False  # TRACK: follow action 실행 중
+        self.follow_check = 0.0
         self.last_dir = 1.0  # 마지막으로 본 방향 (+: 왼쪽 회전)
         self.find_start = 0.0
         self.state = 'WAIT_CAR'
@@ -196,6 +203,7 @@ class Mission:
         # 이전 상태의 감지 기록이 다음 상태 판정에 섞이지 않도록
         self.webcam_win.clear()
         self.robot_win.clear()
+        self.following = False  # TRACK에 들어오면 첫 유효 좌표로 follow action 시작
 
     def publish(self, lin, ang):
         msg = TwistStamped()
@@ -351,12 +359,25 @@ class Mission:
         if r is None:
             return  # depth/TF 무효 프레임은 건너뜀 (기존 goal 유지)
         cam_xy, car_xy = r
-        # 유효 프레임마다 goal 전송 (짝 기준 ~8Hz). 새 goal이 이전 goal을 대체
-        x, y, yaw = approach_goal(cam_xy, car_xy, TRACK_DIST)
         self.nav.get_logger().info(
-            f'TRACK depth {self.raw_dist:.2f} m | car map ({car_xy[0]:.2f}, {car_xy[1]:.2f}) | '
-            f'goal ({x:.2f}, {y:.2f}, {math.degrees(yaw):.0f} deg)', throttle_duration_sec=0.5)
-        self.nav.goToPose(self.nav.getPoseStamped([x, y], math.degrees(yaw)))
+            f'TRACK depth {self.raw_dist:.2f} m | car map ({car_xy[0]:.2f}, {car_xy[1]:.2f})',
+            throttle_duration_sec=0.5)
+        self.follow_car(cam_xy, car_xy, now)
+
+    def follow_car(self, cam_xy, car_xy, now):
+        """첫 유효 프레임에 follow action(FOLLOW_BT) 시작, 이후 차 위치를 goal_update 토픽으로 (대기 없음)."""
+        yaw = math.degrees(math.atan2(car_xy[1] - cam_xy[1], car_xy[0] - cam_xy[0]))  # 카메라에서 차 방향
+        pose = self.nav.getPoseStamped([car_xy[0], car_xy[1]], yaw)
+        if self.following and now - self.follow_check > FOLLOW_CHECK_SEC:
+            self.follow_check = now
+            if self.nav.isTaskComplete():  # follow BT는 성공으로 끝나지 않음 -> 끝났으면 실패, 다시 시작
+                self.nav.warn('follow action 종료(실패): 다시 시작')
+                self.following = False
+        if not self.following:
+            self.following = self.nav.goToPose(pose, FOLLOW_BT)
+            self.follow_check = now
+        else:
+            self.goal_pub.publish(pose)
 
     def do_find(self):
         f = self.robot_frame()
@@ -427,6 +448,19 @@ def selftest():
     assert np.allclose(cam_xy, (2.0, 0.0)) and np.allclose(car_xy, (2.0, 0.0)), (cam_xy, car_xy)
     m.rgb_stamp = 11.5  # odom 데이터보다 미래 -> 건너뜀
     assert m.car_in_map((302, 302, 402, 402), (704, 704)) is None
+    # follow_car: 첫 프레임은 follow action, 이후는 goal_update 토픽. action이 끝나면(실패) 다시 시작
+    calls = []
+    m.nav = SimpleNamespace(getPoseStamped=lambda xy, yaw: (tuple(xy), round(yaw)), warn=lambda *a: None,
+                            goToPose=lambda p, bt: calls.append(('action', p, bt)) or True,
+                            isTaskComplete=lambda: calls.append('check') or done)
+    m.goal_pub = SimpleNamespace(publish=lambda p: calls.append(('topic', p)))
+    m.following, m.follow_check, done = False, 0.0, False
+    m.follow_car((0.0, 0.0), (1.0, 1.0), 10.0)
+    m.follow_car((0.0, 0.0), (1.0, 1.2), 10.1)
+    assert calls == [('action', ((1.0, 1.0), 45), FOLLOW_BT), ('topic', ((1.0, 1.2), 50))], calls
+    done = True  # FOLLOW_CHECK_SEC 뒤 확인했더니 action 종료 -> 다시 action
+    m.follow_car((0.0, 0.0), (1.0, 1.0), 10.0 + FOLLOW_CHECK_SEC + 0.1)
+    assert calls[-2:] == ['check', ('action', ((1.0, 1.0), 45), FOLLOW_BT)], calls
     # K-of-N: 중간에 놓친 프레임이 있어도 K개 이상이면 감지
     w = deque([1, None, 1, 1, None, 1, 1, None, None, None], maxlen=ROBOT_N)
     assert len(hits(w)) == ROBOT_K

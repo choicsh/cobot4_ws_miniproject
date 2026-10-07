@@ -8,6 +8,7 @@
 cobot4_ws_miniproject/
 ├── docs/plan.md
 ├── config/nav2.yaml      turtlebot4 nav2.yaml 로컬 수정본(DWB) 복사 + xy_goal_tolerance 0.1 (nav2 실행 시 params_file로 지정)
+├── config/follow_car.xml TRACK용 Nav2 BT (follow_point.xml 복사, 경로 재계산 4Hz, TruncatePath 1.0m)
 ├── maps/                 my_map.pgm, my_map.yaml (실행 시에는 ~/maps의 파일을 읽음)
 └── src/mini_project/     ROS 패키지 (mission.py, webcam_calib.py, align_check.py, 모델 .pt)
 ```
@@ -53,16 +54,19 @@ WAIT_CAR  -> webcam 프레임마다 YOLO, 'car' conf>=0.5가 최근 10프레임 
 UNDOCK    -> navigator.undock() 후 UNDOCKED_POSE로 초기 위치 설정 (도크에서는 라이다 꺼짐)
 LOCALIZE  -> 새 amcl_pose 수신 후 waitUntilNav2Active()
 NAVIGATE  -> 지도에서 차가 보이는 지점(visible_goal, 없으면 직선 위 APPROACH_DIST)을 goToPose, NAVIGATING에서 완료 대기
-TRACK     -> 로봇 카메라 YOLO bbox + depth → 카메라 TF로 차 map 좌표 → goToPose(차 앞 TRACK_DIST)
+TRACK     -> 로봇 카메라 YOLO bbox + depth → 카메라 TF로 차 map 좌표 → follow action(follow_car.xml) 1회 + goal_update 토픽
 FIND      -> 마지막으로 본 방향으로 제자리 회전, T초 안에 다시 보이면 TRACK
 ```
 
 - `TurtleBot4Navigator(namespace='/robot5')` 노드 하나에 카메라 subscription도 붙인다. navigator의 blocking 호출과 executor가 충돌하지 않게 하려는 것.
-- TRACK 제어 (Nav2 goToPose):
+- TRACK 제어 (Nav2 동적 추종, `follow_point` BT):
   - depth는 bbox 중앙 영역 depth의 median (0과 `MAX_DEPTH_MM` 4m 이상(먼 벽/배경)은 제외). 바닥 평면 필터는 넣지 않음: ROI가 bbox 중앙 1/3이라 차가 45°로 서 있어도 바닥이 거의 들어오지 않음
   - bbox 중심 (u, v)와 depth z를 `oakd/stereo/camera_info`의 K로 역투영: `X=(u-cx)z/fx, Y=(v-cy)z/fy, Z=z` (camera optical frame, frame_id는 depth 메시지 header)
   - `tf_buffer.lookup_transform_full('map', 최신, frame, rgb stamp, 'odom')` 한 번으로 차 map 좌표(`do_transform_point`)와 카메라 map 위치(translation)를 같이 얻는다
-  - `approach_goal(카메라 위치, 차 위치, TRACK_DIST=1.0m)`로 goal을 만들어 `goToPose`. 유효 프레임마다(짝 기준 ~8Hz) 보낸다 (새 goal이 이전 goal을 대체). 예전 `REGOAL_DIST`(0.1m) 기준은 차가 멈춰 있어도 좌표 5~10cm 흔들림에 걸리고 움직일 때는 0.1~0.3s 간격이라 의미가 없어 제거
+  - TRACK에 들어오면 `goToPose(차 위치, behavior_tree=config/follow_car.xml)`를 **한 번** 보내고, 이후 유효 프레임마다(~8Hz) 차 위치(`PoseStamped`, yaw = 카메라→차)를 `/robot5/goal_update` 토픽으로 발행한다 (대기 없음). BT의 `GoalUpdater`가 goal을 바꾸고 `RateController` 4Hz로 경로를 재계산, `TruncatePath` 1.0m(= `TRACK_DIST`)로 차 앞에서 멈춘다. controller는 끊기지 않는다
+  - 이전: 프레임마다 `goToPose`(action) 재전송 → 매번 수락 대기(mission 루프 정지) + BT 재시작·경로 재계산·controller 초기화로 가다 서다 반복
+  - follow BT는 성공으로 끝나지 않는다(`KeepRunningUntilFailure`). `FOLLOW_CHECK_SEC`(1s)마다 `isTaskComplete()`로 확인해 끝났으면(실패) action을 다시 시작
+  - goal이 차 위치 자체라 차가 라이다에 잡히면 goal이 장애물 안: NavFn `tolerance 0.5`로 근처 빈칸까지 계획되므로 그만큼 더 떨어져 멈출 수 있음
   - Nav2 `xy_goal_tolerance`를 0.25 → 0.1로 낮춘 `config/nav2.yaml`을 쓴다. 0.25면 10cm 옮긴 goal이 바로 도착 처리되어 로봇이 움직이지 않는다
   - TF 시각은 bbox를 만든 **rgb가 찍힌 시각**. 최신 TF(`Time()`)를 썼을 때 회전 중 영상 지연(0.2~0.4s)만큼 차 좌표가 좌우로 ±40cm 튀어, 가짜 이동 → goal 재전송 → 회전이 반복됐다 (실측). 과거 시각이라 TF가 버퍼에 있어 `spin_once` 루프에서도 대기 없이 조회된다. 없으면(extrapolation) 그 프레임은 건너뜀
   - 단 `map ← odom`은 **최신 값**. amcl이 scan을 버리며(scan 7.4Hz, map→odom 2.8Hz) 수 초씩 발행을 멈춰 rgb 시각의 체인 조회가 extrapolation으로 실패했다 (실측 3.4s). map→odom은 천천히 변하는 보정값이라 최신 값으로 충분하고, 빠르게 변하는 odom ← 카메라만 rgb 시각으로 조회한다 (`fixed_frame='odom'`)
@@ -140,7 +144,7 @@ webcam은 맵 바깥 회색(unknown) 영역에 고정되어 맵 안쪽 바닥을
 | 1.5 | `ros2 run mini_project webcam_calib`로 H 생성 → `~/maps/webcam_H.npy` | 재투영 오차 10cm 이하. 다른 위치에 로봇을 세웠을 때 변환 좌표와 amcl_pose 차이가 15cm 이하 (H가 있으면 클릭할 때 오차가 출력됨) | H 생성 완료 (2026-10-06). 검증점 15cm 확인 필요 |
 | 2 | `mission.py`: WAIT_CAR → UNDOCK → NAVIGATE(ING) | 차를 바닥에 놓으면 로봇이 차 앞으로 가서 차를 바라봄 | 코드 완료, 실기 확인 필요 |
 | 3 | `mission.py` TRACK 좌표: `stereo/camera_info`가 704x704인지, depth `frame_id` 확인 (시작 로그 `camera_info WxH, frame ...`) 후 TRACK 로그의 `car map (x, y)`가 rviz에서 실제 차 위치와 맞는지 | 오차 15cm 이하 | 코드 완료, 실기 확인 필요 |
-| 4 | `mission.py` TRACK goToPose (`TRACK_DIST` = 1.0m, 프레임마다 goal, nav2 `xy_goal_tolerance` = 0.1m) | 차를 옮기면 로봇이 차 앞 1.0m로 따라가서 차를 바라봄. goal 근처에서 왔다 갔다 하지 않음 | 코드 완료, 실기 확인 필요 |
+| 4 | `mission.py` TRACK follow action (`follow_car.xml` 4Hz 재계산, TruncatePath 1.0m, goal_update 토픽) | 차를 옮기면 로봇이 멈추지 않고 차 앞 1.0m로 따라감. `ros2 topic info /robot5/goal_update`에 bt_navigator 구독 확인. goal 근처에서 왔다 갔다 하지 않음 | 코드 완료, 실기 확인 필요 |
 | 5 | `mission.py` FIND: 마지막으로 본 방향으로 회전. 한 바퀴(`FIND_SEC`) 돌아도 없으면 WAIT_CAR로 돌아가 webcam으로 위치를 다시 잡음 | 차를 가리면 회전하고, 다시 보이면 TRACK | 코드 완료, 실기 확인 필요 |
 | 6 | 통합 테스트 + 파라미터 튜닝, 시연 bag 녹화 (`record_bag.py`) | 처음부터 끝까지 3회 연속 성공 | |
 
@@ -156,7 +160,7 @@ cd ~/turtlebot4_ws && colcon test --packages-select mini_project --pytest-args t
 |---|---|---|
 | 1. 좌표 계산 | 가짜 K·depth·TF(map←odom 회전·이동 포함)로 `car_in_map` → 차/카메라 map 좌표, 카메라 yaw 3 × 거리·방위 3 | 오차 1cm 이하 |
 | 2. 회전 중 안정성 | 1rad/s 제자리 회전, 영상 지연 0.06/0.12/0.2s, 정지한 차(1.5m) 8Hz 측정 | rgb 시각 TF: 편차 2cm 이하. 최신 TF(이전 방식)는 0.1m 넘게 튀는 것도 확인 |
-| 3. 폐루프 추종 시뮬레이션 | 차: 정지, 0.5m 계단 이동, 0.1/0.2 m/s 직선, 0.15 m/s 원호, 0.4 m/s. 로봇: Nav2 근사(최대 0.26m/s·1rad/s, goal 허용 0.1m/0.25rad, 후진 없음), 8Hz·0.12s 지연·3cm 노이즈 측정, 시야각 ±35°·0.8~4m 밖이면 미감지 | 정지/계단: 최종 거리 1.0±0.12m, 0.1/0.2 m/s·원호: 5s 이후 거리 1.5m 이하, 놓침 0. 0.4 m/s: 따라가지 못함(한계 기록) |
+| 3. 폐루프 추종 시뮬레이션 | 차: 정지, 0.5m 계단 이동, 0.1/0.2 m/s 직선, 0.15 m/s 원호, 0.4 m/s. 로봇: follow_car.xml 근사(측정 8Hz·0.12s 지연·3cm 노이즈 → 4Hz 경로 재계산·1.0m 잘라냄) + Nav2 근사(최대 0.26m/s·1rad/s, goal 허용 0.1m/0.25rad, 후진 없음), 시야각 ±35°·0.8~4m 밖이면 미감지 | 정지/계단: 최종 거리 1.0±0.12m, 0.1/0.2 m/s·원호: 5s 이후 거리 1.5m 이하, 놓침 0. 0.4 m/s: 따라가지 못함(한계 기록) |
 | 4. 실기 로그 분석 | `ros2 run mini_project track_report [로그]` (인자 없으면 `~/.ros/log`의 최신 mission 로그) | 지표만 출력: TRACK 시간·진입/FIND 횟수, goal 전송 Hz, depth 분포, 정지 구간 car map std, TF 실패 로그 수. 파서는 테스트 4에서 검증 |
 
 - 3단계 시뮬레이션 결과(정상 상태 거리): 정지 1.03m, 0.1 m/s 1.16m, 0.2 m/s 1.26m, 원호 1.13~1.17m, 0.4 m/s 놓침. 모델은 Nav2 근사라 실기 성능과 같지 않다 — 알고리즘 변경 시 회귀 확인용
