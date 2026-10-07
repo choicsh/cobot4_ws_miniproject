@@ -65,6 +65,7 @@ FIND      -> 마지막으로 본 방향으로 제자리 회전, T초 안에 다�
   - `tf_buffer.lookup_transform_full('map', 최신, frame, rgb stamp, 'odom')` 한 번으로 차 map 좌표(`do_transform_point`)와 카메라 map 위치(translation)를 같이 얻는다
   - TRACK에 들어오면 `goToPose(차 위치, behavior_tree=config/follow_car.xml)`를 **한 번** 보내고, 이후 유효 프레임마다(~8Hz) 차 위치(`PoseStamped`, yaw = 카메라→차)를 `/robot5/goal_update` 토픽으로 발행한다 (대기 없음). BT의 `GoalUpdater`가 goal을 바꾸고 `RateController` 4Hz로 경로를 재계산, `TruncatePath` 1.0m(= `TRACK_DIST`)로 차 앞에서 멈춘다. controller는 끊기지 않는다
   - 이전: 프레임마다 `goToPose`(action) 재전송 → 매번 수락 대기(mission 루프 정지) + BT 재시작·경로 재계산·controller 초기화로 가다 서다 반복
+  - follow action을 보내기 직전에 `cancelTask()`로 실행 중인 goal(NAVIGATE, 기본 BT)을 취소한다. BT가 다르면 bt_navigator가 선점을 거부해(`Preemption request was rejected since the requested BT XML file is not the same ...`) 로봇이 webcam goal로 계속 갔다 (실측)
   - follow BT는 성공으로 끝나지 않는다(`KeepRunningUntilFailure`). `FOLLOW_CHECK_SEC`(1s)마다 `isTaskComplete()`로 확인해 끝났으면(실패) action을 다시 시작
   - goal이 차 위치 자체라 차가 라이다에 잡히면 goal이 장애물 안: NavFn `tolerance 0.5`로 근처 빈칸까지 계획되므로 그만큼 더 떨어져 멈출 수 있음
   - Nav2 `xy_goal_tolerance`를 0.25 → 0.1로 낮춘 `config/nav2.yaml`을 쓴다. 0.25면 10cm 옮긴 goal이 바로 도착 처리되어 로봇이 움직이지 않는다

@@ -164,7 +164,7 @@ flowchart TD
     T --> PO["follow_car: nav.getPoseStamped(car_xy, yaw = 카메라→차)<br/>geometry_msgs/PoseStamped, frame 'map'"]
     CAM --> PO
     PO --> FQ{"follow action 실행 중?<br/>(FOLLOW_CHECK_SEC 1s마다 isTaskComplete 확인)"}
-    FQ -- no --> GO["nav.goToPose(pose, behavior_tree=follow_car.xml)<br/>NavigateToPose action 1회"]
+    FQ -- no --> GO["nav.cancelTask() (기본 BT goal 취소: BT가 다르면 선점 거부됨)<br/>nav.goToPose(pose, behavior_tree=follow_car.xml)<br/>NavigateToPose action 1회"]
     FQ -- yes --> GU["goal_pub.publish(pose)<br/>/robot5/goal_update 토픽 (~8Hz, 대기 없음)"]
     GU --> BT["bt_navigator: GoalUpdater → 4Hz ComputePathToPose<br/>→ TruncatePath 1.0m → FollowPath (끊기지 않음)"]
     GO --> BT
@@ -204,7 +204,7 @@ sequenceDiagram
             M->>M: robot_frame() + car_in_map()
             opt depth/TF 유효
                 alt follow action 없음
-                    M->>N: goToPose(follow_car.xml) (수락까지 blocking, 1회)
+                    M->>N: cancelTask() + goToPose(follow_car.xml) (blocking, 1회)
                 else 실행 중
                     M->>N: publish goal_update (대기 없음)
                 end

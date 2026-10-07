@@ -31,7 +31,7 @@ MODEL_DIR = os.path.expanduser('~/turtlebot4_ws/src/mini_project/mini_project') 
 WEBCAM_MODEL = os.path.join(MODEL_DIR, 'yolo8n_merged_dataset_best.pt')
 ROBOT_MODEL = os.path.join(MODEL_DIR, 'yolo8n_merged_dataset_best.pt')
 CAR_CLASS = 'car'
-CONF = 0.8
+CONF = 0.75
 WEBCAM_N, WEBCAM_K = 10, 7  # webcam: 최근 N프레임 중 K개 이상 car면 출발 (좌표는 감지된 것들의 median)
 ROBOT_N, ROBOT_K = 10, 5    # 로봇 카메라: NAVIGATING/FIND에서 최근 N프레임 중 K개 이상이면 TRACK
 APPROACH_DIST = 0.5       # NAVIGATE: webcam 좌표 기준 차 앞 몇 m를 GOAL로. 1.4m에서는 벽 너머라 차가 안 보인 채 도착 (실측).
@@ -374,6 +374,9 @@ class Mission:
                 self.nav.warn('follow action 종료(실패): 다시 시작')
                 self.following = False
         if not self.following:
+            # 실행 중인 goal(NAVIGATE, 기본 BT)을 먼저 취소. BT가 다르면 bt_navigator가 선점을 거부해
+            # 기존 goal로 계속 감 (실측: "Preemption request was rejected ... BT XML file is not the same")
+            self.nav.cancelTask()
             self.following = self.nav.goToPose(pose, FOLLOW_BT)
             self.follow_check = now
         else:
@@ -452,15 +455,16 @@ def selftest():
     calls = []
     m.nav = SimpleNamespace(getPoseStamped=lambda xy, yaw: (tuple(xy), round(yaw)), warn=lambda *a: None,
                             goToPose=lambda p, bt: calls.append(('action', p, bt)) or True,
+                            cancelTask=lambda: calls.append('cancel'),
                             isTaskComplete=lambda: calls.append('check') or done)
     m.goal_pub = SimpleNamespace(publish=lambda p: calls.append(('topic', p)))
     m.following, m.follow_check, done = False, 0.0, False
     m.follow_car((0.0, 0.0), (1.0, 1.0), 10.0)
     m.follow_car((0.0, 0.0), (1.0, 1.2), 10.1)
-    assert calls == [('action', ((1.0, 1.0), 45), FOLLOW_BT), ('topic', ((1.0, 1.2), 50))], calls
+    assert calls == ['cancel', ('action', ((1.0, 1.0), 45), FOLLOW_BT), ('topic', ((1.0, 1.2), 50))], calls
     done = True  # FOLLOW_CHECK_SEC 뒤 확인했더니 action 종료 -> 다시 action
     m.follow_car((0.0, 0.0), (1.0, 1.0), 10.0 + FOLLOW_CHECK_SEC + 0.1)
-    assert calls[-2:] == ['check', ('action', ((1.0, 1.0), 45), FOLLOW_BT)], calls
+    assert calls[-3:] == ['check', 'cancel', ('action', ((1.0, 1.0), 45), FOLLOW_BT)], calls
     # K-of-N: 중간에 놓친 프레임이 있어도 K개 이상이면 감지
     w = deque([1, None, 1, 1, None, 1, 1, None, None, None], maxlen=ROBOT_N)
     assert len(hits(w)) == ROBOT_K
