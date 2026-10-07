@@ -63,7 +63,7 @@ FIND      -> 마지막으로 본 방향으로 제자리 회전, T초 안에 다�
   - `# ponytail: 최신 TF 사용 (spin_once 루프라 timeout 대기 불가). 회전 중 수 cm 오차, 문제되면 MultiThreadedExecutor + depth stamp + timeout`
   - TransformListener는 절대 토픽 `/tf`를 구독하므로 `main()`의 `rclpy.init`에서 `/tf:=/robot5/tf`, `/tf_static:=/robot5/tf_static`으로 remap
   - rgb와 depth 모두 **704x704**로 OAK-D 내부에서 align되어 있다 (`align_check.py`로 확인함). bbox 픽셀 좌표를 depth에 그대로 쓴다. 크기가 다르면 에러를 내고 해당 프레임은 건너뛴다.
-  - cmd_vel은 `geometry_msgs/TwistStamped`, 토픽은 `/robot5/cmd_vel`
+  - cmd_vel은 `geometry_msgs/TwistStamped`, 토픽은 `/robot5/cmd_vel` (FIND 제자리 회전에서만 사용)
   - 입력 토픽은 항상 압축된 것을 쓴다 (`qos_profile_sensor_data`):
     - rgb: `/robot5/oakd/rgb/image_raw/compressed` (`CompressedImage`, `yolo_detection.py` 기본값과 같음)
     - depth: `/robot5/oakd/stereo/image_raw/compressedDepth` (`CompressedImage`). 디코드는 `depth_floor_ransac.py`의 방식 그대로: 12바이트 헤더를 버리고 PNG를 디코드하면 16UC1 mm 값

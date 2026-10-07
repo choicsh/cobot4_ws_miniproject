@@ -184,7 +184,7 @@ class Mission:
         raw = depth_at(self.depth_mm, int((x1 + x2) / 2), int((y1 + y2) / 2), patch) / 1000.0
         self.raw_dist = raw  # 측정 로그용 (stamp 검사 전 값)
         dt = self.rgb_stamp - self.depth_stamp
-        if abs(dt) > MAX_DT:  # 회전 중 어긋난 depth로 전진하지 않도록 (이 프레임은 회전만)
+        if abs(dt) > MAX_DT:  # 회전 중 어긋난 depth로 차 좌표를 잘못 잡지 않도록 (이 프레임은 건너뜀)
             self.nav.get_logger().warn(f'rgb-depth stamp 차이 {dt:+.3f}s > {MAX_DT}s, depth 무시',
                                        throttle_duration_sec=1.0)
             return 0.0
@@ -314,6 +314,7 @@ class Mission:
         if f is None:
             return
         if self.robot_seen():
+            self.publish(0.0, 0.0)  # TRACK 첫 goal 전까지 FIND 회전이 남지 않도록
             self.last_seen = time.monotonic()
             self.set_state('TRACK')
         elif time.monotonic() - self.find_start > FIND_SEC:
