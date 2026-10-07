@@ -31,7 +31,8 @@ CAR_CLASS = 'car'
 CONF = 0.8
 WEBCAM_N, WEBCAM_K = 10, 7  # webcam: 최근 N프레임 중 K개 이상 car면 출발 (좌표는 감지된 것들의 median)
 ROBOT_N, ROBOT_K = 10, 5    # 로봇 카메라: NAVIGATING/FIND에서 최근 N프레임 중 K개 이상이면 TRACK
-APPROACH_DIST = 1.4       # NAVIGATE: webcam 좌표 기준 차 앞 몇 m를 GOAL로 (webcam 오차 + costmap inflation 여유)
+APPROACH_DIST = 0.1       # NAVIGATE: webcam 좌표 기준 차 앞 몇 m를 GOAL로. 1.4m에서는 벽 너머라 차가 안 보인 채 도착 (실측).
+#                           webcam 오차(10~15cm)·로봇 반경(0.19m)보다 작아 차에 닿을 수 있음, 보통은 가는 도중 TRACK으로 전환
 TRACK_DIST = 1.0          # TRACK: 차(가까운 표면) 앞 몇 m를 GOAL로. 카메라 0.8m 안쪽은 차가 화면 하단에 잘림 (실측)
 REGOAL_DIST = 0.1         # TRACK: 차 map 좌표가 직전 goal 기준보다 이만큼 움직이면 goal 다시 보냄 (m)
 #                           Nav2 xy_goal_tolerance(config/nav2.yaml 0.1)보다 작으면 새 goal이 바로 도착 처리됨
