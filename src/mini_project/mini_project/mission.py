@@ -25,14 +25,16 @@ from mini_project.webcam_calib import AMCL_QOS, H_PATH, WEBCAM_INDEX, pixel_to_m
 # ================================
 NAMESPACE = '/robot5'
 MODEL_DIR = os.path.expanduser('~/turtlebot4_ws/src/mini_project/mini_project')  # .pt는 install에 복사 안 됨
-WEBCAM_MODEL = os.path.join(MODEL_DIR, 'yolo8n_best.pt')
+WEBCAM_MODEL = os.path.join(MODEL_DIR, 'yolo8n_merged_dataset_best.pt')
 ROBOT_MODEL = os.path.join(MODEL_DIR, 'yolo8n_merged_dataset_best.pt')
 CAR_CLASS = 'car'
 CONF = 0.8
 WEBCAM_N, WEBCAM_K = 10, 7  # webcam: 최근 N프레임 중 K개 이상 car면 출발 (좌표는 감지된 것들의 median)
 ROBOT_N, ROBOT_K = 10, 5    # 로봇 카메라: NAVIGATING/FIND에서 최근 N프레임 중 K개 이상이면 TRACK
-APPROACH_DIST = 1.4       # 차 앞 몇 m 지점을 Nav2 GOAL로 (costmap inflation보다 크게). NAVIGATE/TRACK 공용
-REGOAL_DIST = 0.2         # TRACK: 차 map 좌표가 직전 goal 기준보다 이만큼 움직이면 goal 다시 보냄 (m)
+APPROACH_DIST = 1.4       # NAVIGATE: webcam 좌표 기준 차 앞 몇 m를 GOAL로 (webcam 오차 + costmap inflation 여유)
+TRACK_DIST = 1.0          # TRACK: 차(가까운 표면) 앞 몇 m를 GOAL로. 카메라 0.8m 안쪽은 차가 화면 하단에 잘림 (실측)
+REGOAL_DIST = 0.1         # TRACK: 차 map 좌표가 직전 goal 기준보다 이만큼 움직이면 goal 다시 보냄 (m)
+#                           Nav2 xy_goal_tolerance(config/nav2.yaml 0.1)보다 작으면 새 goal이 바로 도착 처리됨
 LOST_SEC = 0.7            # 이 시간 동안 안 보이면 FIND
 MAX_DEPTH_MM = 4000        # TRACK depth: 이 거리 이상(먼 벽/배경) 픽셀은 ROI median에서 제외 (mm)
 MAX_DT = 0.1              # rgb와 depth stamp 차이가 이보다 크면 depth 안 씀 (s)
@@ -305,7 +307,7 @@ class Mission:
             throttle_duration_sec=0.5)
         if self.goal_car is not None and math.dist(car_xy, self.goal_car) < REGOAL_DIST:
             return
-        x, y, yaw = approach_goal(cam_xy, car_xy)
+        x, y, yaw = approach_goal(cam_xy, car_xy, TRACK_DIST)
         self.nav.info(f'TRACK goal ({x:.2f}, {y:.2f}, {math.degrees(yaw):.0f} deg)')
         self.nav.goToPose(self.nav.getPoseStamped([x, y], math.degrees(yaw)))
         self.goal_car = car_xy

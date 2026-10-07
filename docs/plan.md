@@ -7,6 +7,7 @@
 ```
 cobot4_ws_miniproject/
 ├── docs/plan.md
+├── config/nav2.yaml      turtlebot4 nav2.yaml 로컬 수정본(DWB) 복사 + xy_goal_tolerance 0.1 (nav2 실행 시 params_file로 지정)
 ├── maps/                 my_map.pgm, my_map.yaml (실행 시에는 ~/maps의 파일을 읽음)
 └── src/mini_project/     ROS 패키지 (mission.py, webcam_calib.py, align_check.py, 모델 .pt)
 ```
@@ -52,7 +53,7 @@ WAIT_CAR  -> webcam 프레임마다 YOLO, 'car' conf>=0.5가 최근 10프레임 
 UNDOCK    -> navigator.undock() 후 UNDOCKED_POSE로 초기 위치 설정 (도크에서는 라이다 꺼짐)
 LOCALIZE  -> 새 amcl_pose 수신 후 waitUntilNav2Active()
 NAVIGATE  -> 차량 map 좌표에서 접근 GOAL을 계산해 goToPose(GOAL), NAVIGATING에서 완료 대기
-TRACK     -> 로봇 카메라 YOLO bbox + depth → 카메라 TF로 차 map 좌표 → goToPose(차 앞 APPROACH_DIST)
+TRACK     -> 로봇 카메라 YOLO bbox + depth → 카메라 TF로 차 map 좌표 → goToPose(차 앞 TRACK_DIST)
 FIND      -> 마지막으로 본 방향으로 제자리 회전, T초 안에 다시 보이면 TRACK
 ```
 
@@ -61,7 +62,8 @@ FIND      -> 마지막으로 본 방향으로 제자리 회전, T초 안에 다�
   - depth는 bbox 중앙 영역 depth의 median (0과 `MAX_DEPTH_MM` 4m 이상(먼 벽/배경)은 제외). 바닥 평면 필터는 넣지 않음: ROI가 bbox 중앙 1/3이라 차가 45°로 서 있어도 바닥이 거의 들어오지 않음
   - bbox 중심 (u, v)와 depth z를 `oakd/stereo/camera_info`의 K로 역투영: `X=(u-cx)z/fx, Y=(v-cy)z/fy, Z=z` (camera optical frame, frame_id는 depth 메시지 header)
   - `tf_buffer.lookup_transform('map', frame, Time())` 한 번으로 차 map 좌표(`do_transform_point`)와 카메라 map 위치(translation)를 같이 얻는다
-  - `approach_goal(카메라 위치, 차 위치, APPROACH_DIST=1.4m)`로 goal을 만들어 `goToPose`. 차가 직전 goal 기준에서 `REGOAL_DIST`(0.2m) 이상 움직였을 때만 다시 보낸다 (새 goal이 이전 goal을 대체)
+  - `approach_goal(카메라 위치, 차 위치, TRACK_DIST=1.0m)`로 goal을 만들어 `goToPose`. 차가 직전 goal 기준에서 `REGOAL_DIST`(0.1m) 이상 움직였을 때만 다시 보낸다 (새 goal이 이전 goal을 대체)
+  - Nav2 `xy_goal_tolerance`를 0.25 → 0.1로 낮춘 `config/nav2.yaml`을 쓴다. 0.25면 10cm 옮긴 goal이 바로 도착 처리되어 로봇이 움직이지 않는다
   - `# ponytail: 최신 TF 사용 (spin_once 루프라 timeout 대기 불가). 회전 중 수 cm 오차, 문제되면 MultiThreadedExecutor + depth stamp + timeout`
   - TransformListener는 절대 토픽 `/tf`를 구독하므로 `main()`의 `rclpy.init`에서 `/tf:=/robot5/tf`, `/tf_static:=/robot5/tf_static`으로 remap
   - rgb와 depth 모두 **704x704**로, **rgb가 depth(stereo) 기준으로** OAK-D 내부에서 align되어 있다 (`align_check.py`, camera_info로 확인함). 그래서 K는 stereo의 것을 쓴다. bbox 픽셀 좌표를 depth에 그대로 쓴다. 크기가 다르면 에러를 내고 해당 프레임은 건너뛴다.
@@ -73,7 +75,7 @@ FIND      -> 마지막으로 본 방향으로 제자리 회전, T초 안에 다�
 - 감지 판정은 슬라이딩 윈도우(K-of-N): webcam 7/10, 로봇 카메라(NAVIGATING/FIND → TRACK) 5/10. 상태가 바뀌면 윈도우를 비운다.
 - TRACK에서 depth 무효(stamp 차이 > `MAX_DT`, 유효 픽셀 없음), camera_info 없음, TF 실패인 프레임은 건너뛰고 진행 중인 goal을 유지한다.
 - FIND에 들어갈 때 `navigator.cancelTask()`를 호출한다. TRACK의 Nav2 goal과 FIND의 cmd_vel 회전이 겹치지 않게 하기 위해서다.
-- 조정 값(`APPROACH_DIST`, `REGOAL_DIST`, conf, N, T)은 파일 상단 상수 또는 ros2 파라미터로 둔다. 실제 로봇에서 튜닝해야 한다.
+- 조정 값(`APPROACH_DIST`, `TRACK_DIST`, `REGOAL_DIST`, conf, N, T)은 파일 상단 상수 또는 ros2 파라미터로 둔다. 실제 로봇에서 튜닝해야 한다.
 
 ## webcam 위치 매핑 (webcam 픽셀 → map 좌표)
 
@@ -131,7 +133,7 @@ webcam은 맵 바깥 회색(unknown) 영역에 고정되어 맵 안쪽 바닥을
 | 1.5 | `ros2 run mini_project webcam_calib`로 H 생성 → `~/maps/webcam_H.npy` | 재투영 오차 10cm 이하. 다른 위치에 로봇을 세웠을 때 변환 좌표와 amcl_pose 차이가 15cm 이하 (H가 있으면 클릭할 때 오차가 출력됨) | H 생성 완료 (2026-10-06). 검증점 15cm 확인 필요 |
 | 2 | `mission.py`: WAIT_CAR → UNDOCK → NAVIGATE(ING) | 차를 바닥에 놓으면 로봇이 차 앞으로 가서 차를 바라봄 | 코드 완료, 실기 확인 필요 |
 | 3 | `mission.py` TRACK 좌표: `stereo/camera_info`가 704x704인지, depth `frame_id` 확인 (시작 로그 `camera_info WxH, frame ...`) 후 TRACK 로그의 `car map (x, y)`가 rviz에서 실제 차 위치와 맞는지 | 오차 15cm 이하 | 코드 완료, 실기 확인 필요 |
-| 4 | `mission.py` TRACK goToPose (`APPROACH_DIST` = 1.4m, 추후 1.0m 등 조정 검토: inflation 반경 확인 필요) | 차를 옮기면 로봇이 차 앞 1.4m로 다시 가서 차를 바라봄 | 코드 완료, 실기 확인 필요 |
+| 4 | `mission.py` TRACK goToPose (`TRACK_DIST` = 1.0m, `REGOAL_DIST` = 0.1m, nav2 `xy_goal_tolerance` = 0.1m) | 차를 10cm 이상 옮기면 로봇이 차 앞 1.0m로 다시 가서 차를 바라봄. goal 근처에서 왔다 갔다 하지 않음 | 코드 완료, 실기 확인 필요 |
 | 5 | `mission.py` FIND: 마지막으로 본 방향으로 회전. 한 바퀴(`FIND_SEC`) 돌아도 없으면 WAIT_CAR로 돌아가 webcam으로 위치를 다시 잡음 | 차를 가리면 회전하고, 다시 보이면 TRACK | 코드 완료, 실기 확인 필요 |
 | 6 | 통합 테스트 + 파라미터 튜닝, 시연 bag 녹화 (`record_bag.py`) | 처음부터 끝까지 3회 연속 성공 | |
 
@@ -143,7 +145,7 @@ webcam은 맵 바깥 회색(unknown) 영역에 고정되어 맵 안쪽 바닥을
 # 1. localization (로봇은 도크에 둔다. 2D Pose Estimate는 필요 없음: mission이 undock 후 자동 설정)
 ROS_SUPER_CLIENT=False ros2 launch turtlebot4_navigation localization.launch.py namespace:=/robot5 map:=$HOME/maps/my_map.yaml
 # 2. nav2
-ROS_SUPER_CLIENT=False ros2 launch turtlebot4_navigation nav2.launch.py namespace:=/robot5
+ROS_SUPER_CLIENT=False ros2 launch turtlebot4_navigation nav2.launch.py namespace:=/robot5 params_file:=$HOME/cobot4_ws_miniproject/config/nav2.yaml
 # 3. (webcam을 옮겼을 때만) 캘리브레이션: 로봇을 teleop으로 기준점마다 이동 → 화면에서 로봇 바닥 중심 클릭 → s
 ros2 run mini_project webcam_calib
 # 4. 미션

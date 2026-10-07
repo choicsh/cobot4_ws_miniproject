@@ -19,7 +19,7 @@ flowchart LR
         FILES[("~/maps/webcam_H.npy<br/>~/maps/my_map.yaml/.pgm<br/>*.pt")]
         RVIZ["rviz2<br/>ROS_SUPER_CLIENT=True"]
         LOC["localization.launch.py<br/>(map_server, amcl)"]
-        NAV["nav2.launch.py<br/>(bt_navigator, planner, controller, ...)"]
+        NAV["nav2.launch.py<br/>params_file: config/nav2.yaml (DWB, xy_goal_tolerance 0.1)<br/>(bt_navigator, planner, controller, ...)"]
     end
 
     subgraph ROBOT["TurtleBot4 (robot5, 192.168.109.105)"]
@@ -95,7 +95,7 @@ stateDiagram-v2
     NAVIGATE --> NAVIGATING: goToPose(approach_goal)
     NAVIGATING --> TRACK: robot cam car 5/10
     NAVIGATING --> FIND: isTaskComplete() and 안 보임
-    TRACK --> TRACK: 차 0.2m 이상 이동 시 goToPose 재전송
+    TRACK --> TRACK: 차 0.1m 이상 이동 시 goToPose 재전송
     TRACK --> FIND: LOST_SEC 0.7s 안 보임, cancelTask()
     FIND --> TRACK: robot cam car 5/10, cmd_vel 0
     FIND --> WAIT_CAR: FIND_SEC 경과, cmd_vel 0
@@ -158,9 +158,9 @@ flowchart TD
     P --> PS["geometry_msgs/PointStamped<br/>point.x/y/z: float64"]
     PS --> T["do_transform_point(pt, tf).point<br/>car_xy: tuple[float,float] map [m]"]
     TF0 --> CAM["tf.transform.translation<br/>cam_xy: tuple[float,float] map [m]"]
-    T --> RG{"goal_car is None<br/>or dist(car_xy, goal_car) >= REGOAL_DIST 0.2m ?"}
+    T --> RG{"goal_car is None<br/>or dist(car_xy, goal_car) >= REGOAL_DIST 0.1m ?"}
     RG -- no --> SKIP
-    RG -- yes --> AG["approach_goal(cam_xy, car_xy, APPROACH_DIST 1.4)<br/>-> (x: float, y: float [m], yaw: float [rad])"]
+    RG -- yes --> AG["approach_goal(cam_xy, car_xy, TRACK_DIST 1.0)<br/>-> (x: float, y: float [m], yaw: float [rad])"]
     CAM --> AG
     AG --> PO["nav.getPoseStamped([x,y], degrees(yaw))<br/>geometry_msgs/PoseStamped, frame 'map'<br/>orientation z=sin(yaw/2), w=cos(yaw/2)"]
     PO --> GO["nav.goToPose(pose)<br/>nav2_msgs/action/NavigateToPose<br/>goal_car = car_xy"]
@@ -197,7 +197,7 @@ sequenceDiagram
             M->>N: isTaskComplete() (최대 0.10s blocking)
         else TRACK
             M->>M: robot_frame() + car_in_map()
-            opt 차 0.2m 이상 이동
+            opt 차 0.1m 이상 이동
                 M->>N: goToPose() (수락까지 blocking)
             end
         else FIND
@@ -266,8 +266,9 @@ flowchart LR
 | `CONF` | 0.8 | | YOLO confidence 임계값 | O |
 | `WEBCAM_N, WEBCAM_K` | 10, 7 | 프레임 | webcam 감지 판정 | O |
 | `ROBOT_N, ROBOT_K` | 10, 5 | 프레임 | 로봇 카메라 감지 판정 (→ TRACK) | O (Hz에 따라 시간 길이 변함) |
-| `APPROACH_DIST` | 1.4 | m | goal을 차 앞 몇 m에 둘지 (NAVIGATE/TRACK) | O (1.0 검토, inflation 확인) |
-| `REGOAL_DIST` | 0.2 | m | TRACK goal 재전송 임계 이동량 | O |
+| `APPROACH_DIST` | 1.4 | m | NAVIGATE goal을 webcam 기준 차 앞 몇 m에 둘지 | O |
+| `TRACK_DIST` | 1.0 | m | TRACK goal을 차(가까운 표면) 앞 몇 m에 둘지. 카메라 0.8m 안쪽은 차가 잘림 | O |
+| `REGOAL_DIST` | 0.1 | m | TRACK goal 재전송 임계 이동량. nav2 `xy_goal_tolerance`(0.1)와 맞춤 | O |
 | `LOST_SEC` | 0.7 | s | 못 보면 FIND | O |
 | `MAX_DEPTH_MM` | 4000 | mm | TRACK depth ROI에서 이 이상(먼 벽/배경) 제외 | O |
 | `MAX_DT` | 0.1 | s | rgb/depth stamp 허용 차이 | O (depth 10Hz라 0.15 검토) |
