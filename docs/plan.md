@@ -1,6 +1,6 @@
 # 미니프로젝트 진행 계획
 
-시스템 구조(토픽, 자료형, 상태 머신, 데이터 흐름)는 [architecture.md](architecture.md) 참고.
+시스템 구조(토픽, 자료형, 상태 머신, 데이터 흐름)는 [architecture.md](architecture.md), 알고리즘과 설계 근거·성능은 [algorithm.md](algorithm.md) 참고.
 
 ## 저장소 구조
 

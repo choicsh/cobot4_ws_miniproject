@@ -1,6 +1,7 @@
 # 시스템 아키텍처
 
 `mini_project/mission.py` 기준 (브랜치 `feature/hhj-track-gotopose`, 2026-10-07).
+알고리즘 설명·설계 근거·성능 그림은 [algorithm.md](algorithm.md).
 표기: **(미확인)** = 코드/실측으로 확인하지 않은 값. 실기에서 확인 후 갱신한다 ([10. 미확인 항목](#10-미확인-항목)).
 
 ## 1. 시스템 구성도
