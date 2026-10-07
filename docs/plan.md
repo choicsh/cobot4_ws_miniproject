@@ -94,9 +94,9 @@ webcam은 맵 바깥 회색(unknown) 영역에 고정되어 맵 안쪽 바닥을
 - `cv2.perspectiveTransform`으로 map (x, y)를 구한다. 최근 10프레임 윈도우에서 감지된 좌표들의 median을 쓴다 (튀는 값 제거).
 - 차 위치를 그대로 GOAL로 쓰지 않는다 (차가 장애물로 잡혀 Nav2가 실패한다). 로봇 현재 위치(도크) → 차 방향으로, 차 앞 `APPROACH_DIST`(0.5m) 지점을 GOAL로 하고, yaw는 차를 바라보게 한다. 가는 도중 로봇 카메라에 차가 들어오면 TRACK으로 넘어간다.
   - 1.4m였을 때 goal이 차와 벽을 사이에 둔 쪽에 찍혀, 차가 안 보인 채 goal 완료 → FIND → WAIT_CAR가 반복됐다 (실측). 0.1m는 webcam 오차·로봇 반경보다 작아 차에 닿을 수 있어 0.5m로 정했다.
-  - **visible_goal (우선 사용):** `/robot5/map`(OccupancyGrid)에서 차 주위 반경 `TRACK_DIST`(1.0m) 원 위 후보(`VIS_STEP_DEG` 15° 간격) 중
+  - **visible_goal (우선 사용):** `/robot5/map`(OccupancyGrid)에서 차 주위 반경 `VIS_RADII`(1.0 → 0.8 → 0.6 → 0.4m, 먼 것부터, 후보가 나온 첫 반경에서 멈춤) 원 위 후보(`VIS_STEP_DEG` 15° 간격) 중
     (1) 주변 `VIS_CLEARANCE`(0.3m) 안에 벽/unknown이 없고 (2) 후보→차 선분에 벽(≥50)이 없는 점 가운데 로봇과 가장 가까운 점을 goal로, yaw는 차를 바라봄.
-    도착하면 바로 TRACK 거리에서 차를 본다. 지도가 없거나 후보가 없으면 위의 직선 방식(`APPROACH_DIST`)
+    1.0m에서 찾으면 도착하자마자 TRACK 거리에서 차를 본다. 지도가 없거나 모든 반경에서 후보가 없으면 위의 직선 방식(`APPROACH_DIST` 0.5m). 로그: `goal [visible 0.8m]` / `goal [straight 0.5m]`
   - `# ponytail:` 후보는 직선 거리로 선택. 벽 반대편 후보가 경로상 더 멀면 `nav.getPath()` 경로 길이로 비교
 - `pixel_to_map(H, u, v)`와 `approach_goal(robot_xy, car_xy, dist)`는 `--selftest` assert로 검증한다.
 

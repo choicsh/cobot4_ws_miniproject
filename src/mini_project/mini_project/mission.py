@@ -36,7 +36,8 @@ ROBOT_N, ROBOT_K = 10, 5    # 로봇 카메라: NAVIGATING/FIND에서 최근 N�
 APPROACH_DIST = 0.5       # NAVIGATE: webcam 좌표 기준 차 앞 몇 m를 GOAL로. 1.4m에서는 벽 너머라 차가 안 보인 채 도착 (실측).
 #                           0.1m는 webcam 오차(10~15cm)·로봇 반경(0.19m)보다 작아 차에 닿을 수 있어 0.5m로
 TRACK_DIST = 1.0          # TRACK: 차(가까운 표면) 앞 몇 m를 GOAL로. 카메라 0.8m 안쪽은 차가 화면 하단에 잘림 (실측)
-VIS_STEP_DEG = 15         # NAVIGATE: 차 주위 TRACK_DIST 원 위 후보 간격 (deg)
+VIS_RADII = (TRACK_DIST, 0.8, 0.6, 0.4)  # NAVIGATE: 차 주위 후보 원 반경, 먼 것부터 (m). 0.4 = 로봇 반경 + 차 반폭 + 여유
+VIS_STEP_DEG = 15         # NAVIGATE: 후보 원 위 간격 (deg)
 VIS_CLEARANCE = 0.3       # NAVIGATE: 후보 주변 이 반경(m) 안에 벽/unknown 있으면 제외 (로봇 반경 0.19 + 여유)
 REGOAL_DIST = 0.1         # TRACK: 차 map 좌표가 직전 goal 기준보다 이만큼 움직이면 goal 다시 보냄 (m)
 #                           Nav2 xy_goal_tolerance(config/nav2.yaml 0.1)보다 작으면 새 goal이 바로 도착 처리됨
@@ -81,13 +82,13 @@ def pixel_to_cam(u, v, z, K):
     return (u - K[0, 2]) * z / K[0, 0], (v - K[1, 2]) * z / K[1, 1], z
 
 
-def visible_goal(grid, res, origin, robot_xy, car_xy, r=TRACK_DIST,
+def visible_goal(grid, res, origin, robot_xy, car_xy, radii=VIS_RADII,
                  step_deg=VIS_STEP_DEG, clearance=VIS_CLEARANCE):
-    """정적 지도에서 차가 보이는 goal (x, y, yaw), 없으면 None.
+    """정적 지도에서 차가 보이는 goal (x, y, yaw, r), 없으면 None.
 
     grid: OccupancyGrid.data (h, w) int8 (0 빈칸, 100 벽, -1 unknown), res [m/cell], origin (x, y) [m].
-    차 주위 반경 r 원 위 후보 중 (1) 주변 clearance 안에 벽/unknown 없고 (2) 후보->차 선분에 벽 없는 것 중
-    로봇과 가장 가까운 점. yaw는 차를 바라봄.
+    radii를 먼 것부터 차례로, 차 주위 반경 r 원 위 후보 중 (1) 주변 clearance 안에 벽/unknown 없고
+    (2) 후보->차 선분에 벽 없는 것 중 로봇과 가장 가까운 점. 후보가 나온 첫 반경에서 멈춤. yaw는 차를 바라봄.
     """
     # ponytail: 직선 거리로 선택. 벽 반대편 후보가 경로상 더 멀면 nav.getPath() 경로 길이로 비교
     h, w = grid.shape
@@ -96,22 +97,26 @@ def visible_goal(grid, res, origin, robot_xy, car_xy, r=TRACK_DIST,
     def cell(x, y):
         return int((y - origin[1]) / res), int((x - origin[0]) / res)  # (row, col)
 
-    best = None
-    for a in np.radians(np.arange(0, 360, step_deg)):
-        x, y = car_xy[0] + r * math.cos(a), car_xy[1] + r * math.sin(a)
-        j, i = cell(x, y)
-        if not (c <= j < h - c and c <= i < w - c):
-            continue
-        if np.any(grid[j - c:j + c + 1, i - c:i + c + 1] != 0):  # 정사각형 창 (원보다 약간 보수적)
-            continue
-        n = int(r / res * 2) + 1  # 셀 크기의 절반 간격으로 선분 샘플
-        rows, cols = zip(*(cell(x + (car_xy[0] - x) * t, y + (car_xy[1] - y) * t) for t in np.linspace(0, 1, n)))
-        if np.any(grid[np.clip(rows, 0, h - 1), np.clip(cols, 0, w - 1)] >= 50):
-            continue
-        d = math.dist((x, y), robot_xy)
-        if best is None or d < best[0]:
-            best = (d, x, y, math.atan2(car_xy[1] - y, car_xy[0] - x))
-    return None if best is None else best[1:]
+    for r in radii:
+        best = None
+        for a in np.radians(np.arange(0, 360, step_deg)):
+            x, y = car_xy[0] + r * math.cos(a), car_xy[1] + r * math.sin(a)
+            j, i = cell(x, y)
+            if not (c <= j < h - c and c <= i < w - c):
+                continue
+            if np.any(grid[j - c:j + c + 1, i - c:i + c + 1] != 0):  # 정사각형 창 (원보다 약간 보수적)
+                continue
+            n = int(r / res * 2) + 1  # 셀 크기의 절반 간격으로 선분 샘플
+            rows, cols = zip(*(cell(x + (car_xy[0] - x) * t, y + (car_xy[1] - y) * t)
+                               for t in np.linspace(0, 1, n)))
+            if np.any(grid[np.clip(rows, 0, h - 1), np.clip(cols, 0, w - 1)] >= 50):
+                continue
+            d = math.dist((x, y), robot_xy)
+            if best is None or d < best[0]:
+                best = (d, x, y, math.atan2(car_xy[1] - y, car_xy[0] - x), r)
+        if best is not None:
+            return best[1:]
+    return None
 
 
 class Mission:
@@ -317,10 +322,11 @@ class Mission:
 
     def do_navigate(self):
         g = None if self.map is None else visible_goal(*self.map, self.robot_xy, self.car_xy)
-        how = 'visible'
-        if g is None:  # 지도 없음 / 보이는 후보 없음 -> 로봇-차 직선 위
-            g, how = approach_goal(self.robot_xy, self.car_xy), 'straight'
-        x, y, yaw = g
+        if g is not None:
+            x, y, yaw, r = g
+            how = f'visible {r:.1f}m'
+        else:  # 지도 없음 / 모든 반경에서 보이는 후보 없음 -> 로봇-차 직선 위 APPROACH_DIST
+            (x, y, yaw), how = approach_goal(self.robot_xy, self.car_xy), f'straight {APPROACH_DIST:.1f}m'
         self.nav.info(f'goal [{how}] ({x:.2f}, {y:.2f}, {math.degrees(yaw):.0f} deg)')
         self.nav.goToPose(self.nav.getPoseStamped([x, y], math.degrees(yaw)))
         self.set_state('NAVIGATING')
@@ -386,11 +392,16 @@ def selftest():
     # visible_goal: 3m x 3m 지도(0.05m), x=1.0m 세로 벽. 차(1.5,1.5), 로봇은 벽 왼쪽 (0.2,1.5)
     grid = np.zeros((60, 60), np.int8)
     grid[5:55, 20] = 100
-    x, y, yaw = visible_goal(grid, 0.05, (0.0, 0.0), (0.2, 1.5), (1.5, 1.5), 1.0, 15, 0.3)
-    assert x - 1.0 > 0.3, (x, y)  # 벽 너머(왼쪽)·벽에 가까운 후보는 제외
+    x, y, yaw, r = visible_goal(grid, 0.05, (0.0, 0.0), (0.2, 1.5), (1.5, 1.5), (1.0,), 15, 0.3)
+    assert x - 1.0 > 0.3 and r == 1.0, (x, y)  # 벽 너머(왼쪽)·벽에 가까운 후보는 제외
     assert abs(math.dist((x, y), (1.5, 1.5)) - 1.0) < 1e-9
     assert abs(yaw - math.atan2(1.5 - y, 1.5 - x)) < 1e-9  # 차를 바라봄
     assert visible_goal(np.full((60, 60), 100, np.int8), 0.05, (0.0, 0.0), (0.2, 1.5), (1.5, 1.5)) is None
+    # 차(2,2) 주위 반경 1.05m만 빈칸, 나머지 unknown -> 1.0/0.8m 원은 clearance 0.3 불가, 0.6m에서 찾음
+    yy, xx = np.mgrid[0:80, 0:80] * 0.05 + 0.025
+    grid = np.where(np.hypot(xx - 2, yy - 2) < 1.05, 0, -1).astype(np.int8)
+    x, y, yaw, r = visible_goal(grid, 0.05, (0.0, 0.0), (2.0, 0.2), (2.0, 2.0), (1.0, 0.8, 0.6, 0.4), 15, 0.3)
+    assert r == 0.6 and abs(math.dist((x, y), (2.0, 2.0)) - 0.6) < 1e-9, (x, y, r)
     K = np.array([[500.0, 0, 352], [0, 500.0, 352], [0, 0, 1]])
     assert pixel_to_cam(352, 352, 2.0, K) == (0.0, 0.0, 2.0)  # 주점 -> 광축 위
     x, y, z = pixel_to_cam(602, 102, 2.0, K)  # 오른쪽 위: x = 250*2/500 = 1, y = -250*2/500 = -1
