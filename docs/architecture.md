@@ -61,6 +61,7 @@ flowchart LR
 | sub | `/robot5/oakd/rgb/image_raw/compressed` | `sensor_msgs/msg/CompressedImage` (JPEG) | SENSOR | (미확인) | NAVIGATING, TRACK, FIND | `rgb_callback` |
 | sub | `/robot5/oakd/stereo/image_raw/compressedDepth` | `sensor_msgs/msg/CompressedImage` (12B 헤더 + PNG, 16UC1 mm) | SENSOR | 10 (사용자 확인) | TRACK | `depth_callback` |
 | sub | `/robot5/oakd/stereo/camera_info` | `sensor_msgs/msg/CameraInfo` (704x704, rgb가 이 기준으로 align) | SENSOR | (미확인) | TRACK (K) | `camera_info_callback` |
+| sub | `/robot5/map` | `nav_msgs/msg/OccupancyGrid` (0 빈칸, 100 벽, -1 unknown) | RELIABLE, TRANSIENT_LOCAL, depth 1 (`AMCL_QOS`) | 1회 (map_server) | NAVIGATE | `map_callback` |
 | sub | `/robot5/amcl_pose` | `geometry_msgs/msg/PoseWithCovarianceStamped` | RELIABLE, TRANSIENT_LOCAL, depth 1 (`AMCL_QOS`) | 이동 시에만 발행 (미확인) | LOCALIZE, NAVIGATE | `amcl_callback` (+ navigator 내부 구독) |
 | sub | `/robot5/dock_status` | `irobot_create_msgs/msg/DockStatus` | SENSOR | (미확인) | UNDOCK | navigator `_dockCallback` |
 | sub | `/robot5/initialpose` | `geometry_msgs/msg/PoseWithCovarianceStamped` | system default | rviz 입력 시 | (navigator 내부) | navigator `_poseEstimateCallback` |
@@ -92,7 +93,7 @@ stateDiagram-v2
     UNDOCK --> LOCALIZE: undock 완료, setInitialPose(UNDOCKED_POSE)
     LOCALIZE --> LOCALIZE: amcl_pose 대기
     LOCALIZE --> NAVIGATE: 새 amcl_pose, waitUntilNav2Active()
-    NAVIGATE --> NAVIGATING: goToPose(approach_goal)
+    NAVIGATE --> NAVIGATING: goToPose(visible_goal 또는 approach_goal)
     NAVIGATING --> TRACK: robot cam car 5/10
     NAVIGATING --> FIND: isTaskComplete() and 안 보임
     TRACK --> TRACK: 차 0.1m 이상 이동 시 goToPose 재전송
@@ -172,6 +173,7 @@ flowchart TD
 |---|---|---|---|
 | `stamp_sec(msg)` | 메시지 (`header.stamp`) | `float` [s] | `sec + nanosec * 1e-9` |
 | `hits(window)` | `deque` | `list` (None 제외) | K-of-N 판정 |
+| `visible_goal(grid, res, origin, robot_xy, car_xy, r, step_deg, clearance)` | `np.ndarray int8 (h,w)`, `float` [m/cell], `(float, float)` [m] x3, `float` [m], `int` [deg], `float` [m] | `(x, y, yaw) \| None` | 차 주위 반경 r 원 위 후보 중 벽/unknown과 clearance 이상 떨어지고 차까지 선분에 벽 없는 점, 로봇과 가장 가까운 것 |
 | `approach_goal(robot_xy, car_xy, dist)` | `(float, float)` x2 [m], `float` [m] | `(x, y, yaw)` [m, m, rad] | 로봇→차 직선 위 차 앞 `dist` 지점. 이미 `dist` 안쪽이면 현재 위치에서 바라보기만 |
 | `amcl_callback(msg)` | `PoseWithCovarianceStamped` | `robot_xy: tuple[float,float]` [m], `amcl_fresh=True` | NAVIGATE goal 계산용 |
 | `publish(lin, ang)` | `float` [m/s], `float` [rad/s] | `TwistStamped` (frame `base_link`, stamp = now) | FIND 전용 |
@@ -244,6 +246,7 @@ flowchart LR
 | `amcl_fresh` | `bool` | | `amcl_callback`, `do_undock` | `do_localize` | undock 이후 amcl_pose 수신 여부 |
 | `localized` | `bool` | | `do_localize` | `do_wait_car` | 한 번 위치를 잡았는지 (재진입 시 UNDOCK 생략) |
 | `pose_set` | `bool` | | `do_undock` | `do_localize` 로그 | 초기 위치를 mission이 줬는지 |
+| `map` | `tuple[np.ndarray int8 (h,w), float, (float, float)] \| None` | cell, m/cell, m | `map_callback` | `do_navigate` | 정적 지도 (grid, res, origin) |
 | `car_xy` | `np.ndarray float64 (2,) \| None` | m (map) | `do_wait_car` | `do_navigate`, `do_navigating` 로그 | webcam 기준 차 위치 |
 | `goal_car` | `tuple[float,float] \| None` | m (map) | `do_track`, `set_state` (None) | `do_track` | 마지막 goal 보낼 때의 차 위치 |
 | `webcam_win` | `deque[np.ndarray \| None]` (maxlen 10) | m | `do_wait_car` | `do_wait_car` | K-of-N |
@@ -267,7 +270,9 @@ flowchart LR
 | `WEBCAM_N, WEBCAM_K` | 10, 7 | 프레임 | webcam 감지 판정 | O |
 | `ROBOT_N, ROBOT_K` | 10, 5 | 프레임 | 로봇 카메라 감지 판정 (→ TRACK) | O (Hz에 따라 시간 길이 변함) |
 | `APPROACH_DIST` | 0.5 | m | NAVIGATE goal을 webcam 기준 차 앞 몇 m에 둘지 (1.4m는 벽 너머 도착, 0.1m는 충돌 위험) | O |
-| `TRACK_DIST` | 1.0 | m | TRACK goal을 차(가까운 표면) 앞 몇 m에 둘지. 카메라 0.8m 안쪽은 차가 잘림 | O |
+| `VIS_STEP_DEG` | 15 | deg | visible_goal 후보 간격 | O |
+| `VIS_CLEARANCE` | 0.3 | m | visible_goal 후보 주변 벽/unknown 금지 반경 (로봇 반경 0.19 + 여유) | O |
+| `TRACK_DIST` | 1.0 | m | TRACK goal을 차(가까운 표면) 앞 몇 m에 둘지, visible_goal 후보 반경. 카메라 0.8m 안쪽은 차가 잘림 | O |
 | `REGOAL_DIST` | 0.1 | m | TRACK goal 재전송 임계 이동량. nav2 `xy_goal_tolerance`(0.1)와 맞춤 | O |
 | `LOST_SEC` | 0.7 | s | 못 보면 FIND | O |
 | `MAX_DEPTH_MM` | 4000 | mm | TRACK depth ROI에서 이 이상(먼 벽/배경) 제외 | O |

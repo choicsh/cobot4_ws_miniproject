@@ -52,7 +52,7 @@ webcam car detection ──(실패)──┐
 WAIT_CAR  -> webcam 프레임마다 YOLO, 'car' conf>=0.5가 최근 10프레임 중 7개 이상이면 다음 단계
 UNDOCK    -> navigator.undock() 후 UNDOCKED_POSE로 초기 위치 설정 (도크에서는 라이다 꺼짐)
 LOCALIZE  -> 새 amcl_pose 수신 후 waitUntilNav2Active()
-NAVIGATE  -> 차량 map 좌표에서 접근 GOAL을 계산해 goToPose(GOAL), NAVIGATING에서 완료 대기
+NAVIGATE  -> 지도에서 차가 보이는 지점(visible_goal, 없으면 직선 위 APPROACH_DIST)을 goToPose, NAVIGATING에서 완료 대기
 TRACK     -> 로봇 카메라 YOLO bbox + depth → 카메라 TF로 차 map 좌표 → goToPose(차 앞 TRACK_DIST)
 FIND      -> 마지막으로 본 방향으로 제자리 회전, T초 안에 다시 보이면 TRACK
 ```
@@ -94,7 +94,10 @@ webcam은 맵 바깥 회색(unknown) 영역에 고정되어 맵 안쪽 바닥을
 - `cv2.perspectiveTransform`으로 map (x, y)를 구한다. 최근 10프레임 윈도우에서 감지된 좌표들의 median을 쓴다 (튀는 값 제거).
 - 차 위치를 그대로 GOAL로 쓰지 않는다 (차가 장애물로 잡혀 Nav2가 실패한다). 로봇 현재 위치(도크) → 차 방향으로, 차 앞 `APPROACH_DIST`(0.5m) 지점을 GOAL로 하고, yaw는 차를 바라보게 한다. 가는 도중 로봇 카메라에 차가 들어오면 TRACK으로 넘어간다.
   - 1.4m였을 때 goal이 차와 벽을 사이에 둔 쪽에 찍혀, 차가 안 보인 채 goal 완료 → FIND → WAIT_CAR가 반복됐다 (실측). 0.1m는 webcam 오차·로봇 반경보다 작아 차에 닿을 수 있어 0.5m로 정했다.
-  - 그래도 반복되면: map에서 goal-차 선분의 벽(occupied 셀)을 검사해 차 주위 여러 방향 중 보이는 지점을 goal로 고른다
+  - **visible_goal (우선 사용):** `/robot5/map`(OccupancyGrid)에서 차 주위 반경 `TRACK_DIST`(1.0m) 원 위 후보(`VIS_STEP_DEG` 15° 간격) 중
+    (1) 주변 `VIS_CLEARANCE`(0.3m) 안에 벽/unknown이 없고 (2) 후보→차 선분에 벽(≥50)이 없는 점 가운데 로봇과 가장 가까운 점을 goal로, yaw는 차를 바라봄.
+    도착하면 바로 TRACK 거리에서 차를 본다. 지도가 없거나 후보가 없으면 위의 직선 방식(`APPROACH_DIST`)
+  - `# ponytail:` 후보는 직선 거리로 선택. 벽 반대편 후보가 경로상 더 멀면 `nav.getPath()` 경로 길이로 비교
 - `pixel_to_map(H, u, v)`와 `approach_goal(robot_xy, car_xy, dist)`는 `--selftest` assert로 검증한다.
 
 `# ponytail: 렌즈 왜곡 무시. 광각 webcam이라 가장자리 오차가 크면 cv2.undistortPoints를 먼저 적용`
