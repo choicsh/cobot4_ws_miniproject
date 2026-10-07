@@ -252,10 +252,11 @@ class Mission:
         if z <= 0:
             return None
         try:
-            # bbox(방향)를 만든 rgb가 찍힌 시각의 TF. 최신 TF(Time())를 쓰면 회전 중 영상 지연만큼
-            # 차 좌표가 좌우로 튐 (실측 ±40cm). 과거 시각이라 버퍼에 있으므로 대기 없이 조회됨
+            # odom <- 카메라: bbox를 만든 rgb가 찍힌 시각. 최신 TF면 회전 중 영상 지연만큼 차 좌표가 좌우로 튐 (실측 ±40cm)
+            # map <- odom: 최신 값. amcl이 scan을 버리며 수 초씩 발행을 멈춰도(실측 3.4s) extrapolation 실패하지 않도록.
+            # 과거/최신 시각이라 버퍼에 있으므로 대기 없이 조회됨
             stamp = Time(nanoseconds=round(self.rgb_stamp * 1e9))
-            tf = self.tf_buffer.lookup_transform('map', self.depth_frame, stamp)
+            tf = self.tf_buffer.lookup_transform_full('map', Time(), self.depth_frame, stamp, 'odom')
         except TransformException as e:
             self.nav.get_logger().warn(f'TF map <- {self.depth_frame!r} 실패: {e}', throttle_duration_sec=1.0)
             return None
@@ -416,6 +417,27 @@ def selftest():
     assert abs(m.box_depth((300, 300, 400, 400), (704, 704)) - 1.0) < 1e-9
     m.rgb_stamp = 10.0 + MAX_DT + 0.1
     assert m.box_depth((300, 300, 400, 400), (704, 704)) == 0.0
+    # car_in_map: map<-odom은 오래된 값(t=1)뿐이어도, odom<-카메라는 rgb 시각(10.5)으로 보간해서 조회
+    from geometry_msgs.msg import TransformStamped
+    from tf2_ros import Buffer as TfBuffer
+
+    def tfs(parent, child, t, x):
+        msg = TransformStamped()
+        msg.header.frame_id, msg.child_frame_id = parent, child
+        msg.header.stamp = Time(seconds=t).to_msg()
+        msg.transform.translation.x, msg.transform.rotation.w = x, 1.0
+        return msg
+    m.tf_buffer = TfBuffer()
+    m.tf_buffer.set_transform(tfs('map', 'odom', 1.0, 1.0), 'test')
+    m.tf_buffer.set_transform(tfs('odom', 'cam', 10.0, 0.0), 'test')
+    m.tf_buffer.set_transform(tfs('odom', 'cam', 11.0, 2.0), 'test')  # 카메라가 1초에 2m 이동
+    m.K, m.depth_frame = K, 'cam'
+    m.depth_mm = np.full((704, 704), 1000, np.uint16)
+    m.rgb_stamp = m.depth_stamp = 10.5
+    cam_xy, car_xy = m.car_in_map((302, 302, 402, 402), (704, 704))  # 주점 -> 카메라 광축 1m 앞
+    assert np.allclose(cam_xy, (2.0, 0.0)) and np.allclose(car_xy, (2.0, 0.0)), (cam_xy, car_xy)
+    m.rgb_stamp = m.depth_stamp = 11.5  # odom 데이터보다 미래 -> 건너뜀
+    assert m.car_in_map((302, 302, 402, 402), (704, 704)) is None
     # K-of-N: 중간에 놓친 프레임이 있어도 K개 이상이면 감지
     w = deque([1, None, 1, 1, None, 1, 1, None, None, None], maxlen=ROBOT_N)
     assert len(hits(w)) == ROBOT_K

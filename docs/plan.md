@@ -61,10 +61,11 @@ FIND      -> 마지막으로 본 방향으로 제자리 회전, T초 안에 다�
 - TRACK 제어 (Nav2 goToPose):
   - depth는 bbox 중앙 영역 depth의 median (0과 `MAX_DEPTH_MM` 4m 이상(먼 벽/배경)은 제외). 바닥 평면 필터는 넣지 않음: ROI가 bbox 중앙 1/3이라 차가 45°로 서 있어도 바닥이 거의 들어오지 않음
   - bbox 중심 (u, v)와 depth z를 `oakd/stereo/camera_info`의 K로 역투영: `X=(u-cx)z/fx, Y=(v-cy)z/fy, Z=z` (camera optical frame, frame_id는 depth 메시지 header)
-  - `tf_buffer.lookup_transform('map', frame, rgb stamp)` 한 번으로 차 map 좌표(`do_transform_point`)와 카메라 map 위치(translation)를 같이 얻는다
+  - `tf_buffer.lookup_transform_full('map', 최신, frame, rgb stamp, 'odom')` 한 번으로 차 map 좌표(`do_transform_point`)와 카메라 map 위치(translation)를 같이 얻는다
   - `approach_goal(카메라 위치, 차 위치, TRACK_DIST=1.0m)`로 goal을 만들어 `goToPose`. 차가 직전 goal 기준에서 `REGOAL_DIST`(0.1m) 이상 움직였을 때만 다시 보낸다 (새 goal이 이전 goal을 대체)
   - Nav2 `xy_goal_tolerance`를 0.25 → 0.1로 낮춘 `config/nav2.yaml`을 쓴다. 0.25면 10cm 옮긴 goal이 바로 도착 처리되어 로봇이 움직이지 않는다
   - TF 시각은 bbox를 만든 **rgb가 찍힌 시각**. 최신 TF(`Time()`)를 썼을 때 회전 중 영상 지연(0.2~0.4s)만큼 차 좌표가 좌우로 ±40cm 튀어, 가짜 이동 → goal 재전송 → 회전이 반복됐다 (실측). 과거 시각이라 TF가 버퍼에 있어 `spin_once` 루프에서도 대기 없이 조회된다. 없으면(extrapolation) 그 프레임은 건너뜀
+  - 단 `map ← odom`은 **최신 값**. amcl이 scan을 버리며(scan 7.4Hz, map→odom 2.8Hz) 수 초씩 발행을 멈춰 rgb 시각의 체인 조회가 extrapolation으로 실패했다 (실측 3.4s). map→odom은 천천히 변하는 보정값이라 최신 값으로 충분하고, 빠르게 변하는 odom ← 카메라만 rgb 시각으로 조회한다 (`fixed_frame='odom'`)
   - TransformListener는 절대 토픽 `/tf`를 구독하므로 `main()`의 `rclpy.init`에서 `/tf:=/robot5/tf`, `/tf_static:=/robot5/tf_static`으로 remap
   - rgb와 depth 모두 **704x704**로, **rgb가 depth(stereo) 기준으로** OAK-D 내부에서 align되어 있다 (`align_check.py`, camera_info로 확인함). 그래서 K는 stereo의 것을 쓴다. bbox 픽셀 좌표를 depth에 그대로 쓴다. 크기가 다르면 에러를 내고 해당 프레임은 건너뛴다.
   - cmd_vel은 `geometry_msgs/TwistStamped`, 토픽은 `/robot5/cmd_vel` (FIND 제자리 회전에서만 사용)
