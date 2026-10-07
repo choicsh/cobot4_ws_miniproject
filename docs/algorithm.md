@@ -13,7 +13,7 @@ flowchart TD
     L --> N["NAVIGATE<br/>지도에서 차가 보이는 지점<br/>(visible_goal)으로 goToPose"]
     N -->|"로봇 카메라 5/10 감지"| T["TRACK<br/>bbox + depth + TF → 차 map 좌표<br/>Nav2 follow BT로 1.0m 유지"]
     N -->|"도착했는데 안 보임"| F["FIND<br/>마지막 본 방향으로 제자리 회전"]
-    T -->|"0.7s 못 봄"| F
+    T -->|"0.7s 못 봄: 마지막 차 위치가<br/>보이는 지점으로"| N
     F -->|"5/10 감지"| T
     F -->|"한 바퀴(~22s) 실패"| W
     W -.->|"이미 위치 잡음"| N
@@ -98,7 +98,7 @@ sequenceDiagram
         B-)C: FollowPath (끊기지 않고 새 경로 이어받음)
     end
     Note over M: 1초마다 isTaskComplete() — follow BT는 성공으로 끝나지 않으므로 끝났으면 실패 → 다시 시작
-    Note over M: 0.7s 못 보면 cancelTask() → FIND
+    Note over M: 0.7s 못 보면 cancelTask() → NAVIGATE (마지막 차 위치로)
 ```
 
 - goal은 **차 위치 자체**, 1.0m 앞에서 멈추는 건 BT의 `TruncatePath`(경로 끝 1.0m 잘라냄) = `TRACK_DIST`.
@@ -147,14 +147,16 @@ flowchart TD
 |---|---|---|---|
 | bbox는 있는데 depth/TF 무효 | 발행 안 함 (`last_seen`은 갱신) | `GoalUpdater`가 마지막 차 위치 유지, 4Hz 재계산 | 마지막으로 본 차 위치 1.0m 앞으로 계속 |
 | 감지 안 됨 0.7s 미만 | 발행 안 함 | 〃 | 〃 (도착했으면 대기) |
-| 감지 안 됨 0.7s 이상 (`LOST_SEC`) | `cancelTask()` → FIND | action 취소, goal 사라짐 | 멈춤 → 제자리 회전 |
-| FIND → TRACK 재진입 | `cancelTask()` + 새 action (현재 차 pose) | 이전 세션의 저장 goal은 stamp가 오래되어 무시 | 새 차 위치로 |
+| 감지 안 됨 0.7s 이상 (`LOST_SEC`) | `cancelTask()` → NAVIGATE (`car_xy` = 마지막으로 본 차 위치) | follow action 취소, 기본 BT로 visible_goal | 마지막 차 위치가 보이는 지점으로 이동. 가는 중 보이면 TRACK, 도착해도 못 보면 FIND |
+| NAVIGATING/FIND → TRACK 재진입 | `cancelTask()` + 새 action (현재 차 pose) | 이전 세션의 저장 goal은 stamp가 오래되어 무시 | 새 차 위치로 |
 | 경로 계산/추종 실패 (예: 차가 라이다에 잡혀 goal 주변이 막힘) | 1s 안에 `isTaskComplete()`로 감지 → `follow action 종료(실패): 다시 시작` | action FAILED (복구 동작 없음) | 잠깐 멈췄다가 새 action으로 재시작 |
 
-## 6. FIND
+## 6. 놓쳤을 때와 FIND
 
+- TRACK에서 0.7s(`LOST_SEC`) 못 보면 그 자리에서 돌지 않는다. follow action을 취소하고, **마지막으로 본 차 위치**(TRACK 유효 프레임마다 `car_xy` 갱신)로 NAVIGATE → 그 위치가 보이는 지점(visible_goal)으로 이동한다. 가는 중 5/10 감지되면 TRACK, 도착해도 못 보면 FIND.
+- 이전: 놓친 자리에서 바로 FIND → 차가 벽 뒤로 돌아가거나 멀어지면 회전해도 안 보여 22s 허비 (실측)
 - 마지막으로 본 bbox가 화면 왼쪽이면 왼쪽(+)으로, 오른쪽이면 오른쪽으로 `FIND_ANG` 0.3 rad/s 제자리 회전 (cmd_vel).
-- 들어갈 때 Nav2 goal 취소(cmd_vel과 겹치지 않게), TRACK으로 돌아갈 때 정지 명령(회전 잔여 방지).
+- FIND는 NAVIGATING이 도착했는데 못 봤을 때 들어간다. 들어갈 때 Nav2 goal 취소(cmd_vel과 겹치지 않게), TRACK으로 돌아갈 때 정지 명령(회전 잔여 방지).
 - 한 바퀴(2π/0.3 + 1 ≈ 22s) 안에 5/10 감지가 없으면 WAIT_CAR로 돌아가 webcam으로 다시 위치를 잡는다 (이미 위치를 잡았으므로 UNDOCK/LOCALIZE 생략).
 
 ## 7. 설계 결정과 근거 (실측)
@@ -172,6 +174,7 @@ flowchart TD
 | ⑨ | Ctrl+C 후 정지/goal 취소 안 됨 | rclpy가 SIGINT에 context를 먼저 닫음 | `SignalHandlerOptions.NO` |
 | ⑩ | NAVIGATING 21s 동안 차를 못 봄, 카메라 창이 늦게 뜸 | OAK-D 토픽 연결(discovery)이 mission 시작 후 **20~50s 이상** 걸려, 카메라 없이 주행 (실측: NAVIGATING 시작 14s 뒤 첫 camera_info, 한 실행은 끝까지 미수신) | LOCALIZE에서 rgb-depth 짝 + camera_info 수신까지 대기 |
 | ⑪ | NAVIGATING 첫 프레임 지연 | 로봇 YOLO 첫 추론 1,274ms (이후 5ms, GPU 초기화) | 시작 시 빈 이미지로 미리 추론 |
+| ⑫ | 놓친 자리에서 회전해도 못 찾음 (FIND 한 바퀴 실패) | 차가 벽 뒤로/멀리 이동했는데 놓친 지점에서 바로 제자리 회전 | 놓치면 마지막 차 위치가 보이는 지점으로 NAVIGATE 후 FIND |
 
 ## 8. 성능
 

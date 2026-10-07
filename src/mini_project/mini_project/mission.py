@@ -269,7 +269,7 @@ class Mission:
         return (t.x, t.y), (p.x, p.y)
 
     def start_find(self):
-        self.nav.cancelTask()  # TRACK의 Nav2 goal과 FIND의 cmd_vel이 겹치지 않도록 (끝난 goal이면 무시됨)
+        self.nav.cancelTask()  # NAVIGATE goal과 FIND의 cmd_vel이 겹치지 않도록 (끝난 goal이면 무시됨)
         self.find_start = time.monotonic()
         self.set_state('FIND')
 
@@ -359,7 +359,11 @@ class Mission:
         now = time.monotonic()
         if box is None:
             if now - self.last_seen > LOST_SEC:
-                self.start_find()
+                # 놓치면 그 자리에서 돌지 않고, 마지막으로 본 차 위치가 보이는 지점(visible_goal)으로 가서 찾는다.
+                # 가는 중 다시 보이면 TRACK, 도착해도 못 보면 NAVIGATING -> FIND
+                self.nav.cancelTask()  # follow BT goal 취소 (BT가 다른 기본 BT goal은 선점 거부됨)
+                self.nav.info(f'TRACK 놓침: 마지막 차 위치 ({self.car_xy[0]:.2f}, {self.car_xy[1]:.2f})로 이동')
+                self.set_state('NAVIGATE')
             return  # 잠깐 놓친 건 진행 중인 goal 유지
         self.last_seen = now
         if self.K is not None:  # 차가 화면 왼쪽이면 FIND에서 왼쪽(+) 회전
@@ -368,6 +372,7 @@ class Mission:
         if r is None:
             return  # depth/TF 무효 프레임은 건너뜀 (기존 goal 유지)
         cam_xy, car_xy = r
+        self.car_xy = car_xy  # 마지막으로 본 차 위치 (놓치면 NAVIGATE 목표)
         self.nav.get_logger().info(
             f'TRACK depth {self.raw_dist:.2f} m | car map ({car_xy[0]:.2f}, {car_xy[1]:.2f})',
             throttle_duration_sec=0.5)
@@ -474,6 +479,23 @@ def selftest():
     done = True  # FOLLOW_CHECK_SEC 뒤 확인했더니 action 종료 -> 다시 action
     m.follow_car((0.0, 0.0), (1.0, 1.0), 10.0 + FOLLOW_CHECK_SEC + 0.1)
     assert calls[-3:] == ['check', 'cancel', ('action', ((1.0, 1.0), 45), FOLLOW_BT)], calls
+    # do_track: 유효 프레임마다 car_xy 갱신, LOST_SEC 넘게 못 보면 follow goal 취소 후 마지막 위치로 NAVIGATE
+    calls = []
+    m.nav = SimpleNamespace(cancelTask=lambda: calls.append('cancel'), info=lambda *a: None,
+                            get_logger=lambda: SimpleNamespace(info=lambda *a, **k: None))
+    m.state, m.webcam_win, m.robot_win, m.car_xy = 'TRACK', deque(), deque(), (9.0, 9.0)
+    m.robot_frame = lambda: ((300, 300, 400, 400), (704, 704))
+    m.car_in_map = lambda box, shape: ((0.0, 0.0), (1.0, 2.0))
+    m.follow_car = lambda *a: calls.append('follow')
+    m.do_track()
+    assert m.car_xy == (1.0, 2.0) and calls == ['follow'] and m.state == 'TRACK'
+    m.robot_frame = lambda: (None, (704, 704))
+    m.do_track()  # 방금 봤으므로 유지
+    assert m.state == 'TRACK'
+    m.last_seen = time.monotonic() - LOST_SEC - 0.1
+    m.do_track()
+    assert calls == ['follow', 'cancel'] and m.state == 'NAVIGATE' and m.car_xy == (1.0, 2.0)
+    del m.robot_frame, m.car_in_map, m.follow_car  # 인스턴스 대체 해제
     # K-of-N: 중간에 놓친 프레임이 있어도 K개 이상이면 감지
     w = deque([1, None, 1, 1, None, 1, 1, None, None, None], maxlen=ROBOT_N)
     assert len(hits(w)) == ROBOT_K

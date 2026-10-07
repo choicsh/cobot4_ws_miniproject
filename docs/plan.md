@@ -81,7 +81,8 @@ FIND      -> 마지막으로 본 방향으로 제자리 회전, T초 안에 다�
     - rgb와 depth는 `message_filters.ApproximateTimeSynchronizer`(slop `SYNC_SLOP` 0.05s)로 짝지어 depth가 도착할 때 같이 처리한다. 실측: rgb 26Hz(도착 ~0.06s), depth 8Hz(도착 ~0.13s), 짝 8.2Hz·stamp 차이 median 1.6ms. 최신 rgb를 바로 쓰던 때는 그 시각의 depth/odom TF가 아직 없어 프레임 대부분을 버려 TRACK이 버벅였다. 감지(NAVIGATING/FIND 포함)도 짝 기준 ~8Hz
 - 감지 판정은 슬라이딩 윈도우(K-of-N): webcam 7/10, 로봇 카메라(NAVIGATING/FIND → TRACK) 5/10. 상태가 바뀌면 윈도우를 비운다.
 - TRACK에서 depth 무효(유효 픽셀 없음), camera_info 없음, TF 실패인 프레임은 건너뛰고 진행 중인 goal을 유지한다.
-- FIND에 들어갈 때 `navigator.cancelTask()`를 호출한다. TRACK의 Nav2 goal과 FIND의 cmd_vel 회전이 겹치지 않게 하기 위해서다.
+- TRACK에서 0.7s 못 보면 follow action을 취소하고 마지막으로 본 차 위치로 NAVIGATE(visible_goal) → 가는 중 보이면 TRACK, 도착해도 못 보면 FIND. 놓친 자리에서 바로 돌면 벽 뒤로 간 차를 못 찾았다.
+- FIND에 들어갈 때 `navigator.cancelTask()`를 호출한다. NAVIGATE의 Nav2 goal과 FIND의 cmd_vel 회전이 겹치지 않게 하기 위해서다.
 - 조정 값(`APPROACH_DIST`, `TRACK_DIST`, conf, N, T)은 파일 상단 상수 또는 ros2 파라미터로 둔다. 실제 로봇에서 튜닝해야 한다.
 
 ## webcam 위치 매핑 (webcam 픽셀 → map 좌표)

@@ -100,7 +100,7 @@ stateDiagram-v2
     NAVIGATING --> TRACK: robot cam car 5/10
     NAVIGATING --> FIND: isTaskComplete() and 안 보임
     TRACK --> TRACK: follow action 1회 + 유효 프레임마다 goal_update 토픽
-    TRACK --> FIND: LOST_SEC 0.7s 안 보임, cancelTask()
+    TRACK --> NAVIGATE: LOST_SEC 0.7s 안 보임, cancelTask(), 마지막 차 위치로
     FIND --> TRACK: robot cam car 5/10, cmd_vel 0
     FIND --> WAIT_CAR: FIND_SEC 경과, cmd_vel 0
 ```
@@ -112,7 +112,7 @@ stateDiagram-v2
 | LOCALIZE | `amcl_pose`, 로봇 카메라 | 없음 | `amcl_fresh` 후 `waitUntilNav2Active()`(1회, `nav2_ready`), 이어서 `depth_mm`·`K` 수신까지 대기 |
 | NAVIGATE | `robot_xy`, `car_xy` | (goal 1회 전송) | 즉시 NAVIGATING |
 | NAVIGATING | 로봇 rgb | **Nav2** (webcam 좌표 goal) | car 5/10 → TRACK, task 완료 → FIND |
-| TRACK | 로봇 rgb + depth + K + TF | **Nav2** (카메라 TF 좌표 goal) | 0.7s 못 봄 → FIND |
+| TRACK | 로봇 rgb + depth + K + TF | **Nav2** (follow BT, 카메라 TF 좌표) | 0.7s 못 봄 → NAVIGATE (car_xy = 마지막으로 본 위치) |
 | FIND | 로봇 rgb | **cmd_vel** 제자리 회전 `FIND_ANG * last_dir` | car 5/10 → TRACK, `FIND_SEC` → WAIT_CAR |
 
 상태가 바뀔 때마다 `set_state()`가 `webcam_win`, `robot_win`을 비운다.
