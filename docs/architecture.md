@@ -266,7 +266,7 @@ flowchart LR
 | `CONF` | 0.8 | | YOLO confidence 임계값 | O |
 | `WEBCAM_N, WEBCAM_K` | 10, 7 | 프레임 | webcam 감지 판정 | O |
 | `ROBOT_N, ROBOT_K` | 10, 5 | 프레임 | 로봇 카메라 감지 판정 (→ TRACK) | O (Hz에 따라 시간 길이 변함) |
-| `APPROACH_DIST` | 0.1 | m | NAVIGATE goal을 webcam 기준 차 앞 몇 m에 둘지 (1.4m는 벽 너머 도착 문제) | O |
+| `APPROACH_DIST` | 0.5 | m | NAVIGATE goal을 webcam 기준 차 앞 몇 m에 둘지 (1.4m는 벽 너머 도착, 0.1m는 충돌 위험) | O |
 | `TRACK_DIST` | 1.0 | m | TRACK goal을 차(가까운 표면) 앞 몇 m에 둘지. 카메라 0.8m 안쪽은 차가 잘림 | O |
 | `REGOAL_DIST` | 0.1 | m | TRACK goal 재전송 임계 이동량. nav2 `xy_goal_tolerance`(0.1)와 맞춤 | O |
 | `LOST_SEC` | 0.7 | s | 못 보면 FIND | O |

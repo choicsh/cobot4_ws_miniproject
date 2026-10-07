@@ -92,8 +92,8 @@ webcam은 맵 바깥 회색(unknown) 영역에 고정되어 맵 안쪽 바닥을
 **2) 실행 시 (`mission.py` WAIT_CAR → NAVIGATE)**
 - 차의 픽셀 위치는 **bbox 하단 중앙** `((x1+x2)/2, y2)`. 바닥에 닿는 점이라 homography 가정에 맞는다. bbox 중심을 쓰면 차 높이만큼 멀리 찍힌다.
 - `cv2.perspectiveTransform`으로 map (x, y)를 구한다. 최근 10프레임 윈도우에서 감지된 좌표들의 median을 쓴다 (튀는 값 제거).
-- 차 위치를 그대로 GOAL로 쓰지 않는다 (차가 장애물로 잡혀 Nav2가 실패한다). 로봇 현재 위치(도크) → 차 방향으로, 차 앞 `APPROACH_DIST`(0.1m) 지점을 GOAL로 하고, yaw는 차를 바라보게 한다. 가는 도중 로봇 카메라에 차가 들어오면 TRACK으로 넘어간다.
-  - 1.4m였을 때 goal이 차와 벽을 사이에 둔 쪽에 찍혀, 차가 안 보인 채 goal 완료 → FIND → WAIT_CAR가 반복됐다 (실측). 0.1m는 webcam 오차·로봇 반경보다 작아 차에 닿을 수 있다.
+- 차 위치를 그대로 GOAL로 쓰지 않는다 (차가 장애물로 잡혀 Nav2가 실패한다). 로봇 현재 위치(도크) → 차 방향으로, 차 앞 `APPROACH_DIST`(0.5m) 지점을 GOAL로 하고, yaw는 차를 바라보게 한다. 가는 도중 로봇 카메라에 차가 들어오면 TRACK으로 넘어간다.
+  - 1.4m였을 때 goal이 차와 벽을 사이에 둔 쪽에 찍혀, 차가 안 보인 채 goal 완료 → FIND → WAIT_CAR가 반복됐다 (실측). 0.1m는 webcam 오차·로봇 반경보다 작아 차에 닿을 수 있어 0.5m로 정했다.
   - 그래도 반복되면: map에서 goal-차 선분의 벽(occupied 셀)을 검사해 차 주위 여러 방향 중 보이는 지점을 goal로 고른다
 - `pixel_to_map(H, u, v)`와 `approach_goal(robot_xy, car_xy, dist)`는 `--selftest` assert로 검증한다.
 
