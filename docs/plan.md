@@ -146,6 +146,23 @@ webcam은 맵 바깥 회색(unknown) 영역에 고정되어 맵 안쪽 바닥을
 
 체크: `ros2 run mini_project mission --selftest` (approach_goal, pixel_to_cam), `ros2 run mini_project webcam_calib --selftest` (homography)
 
+### 추종 성능 테스트 (`src/mini_project/test/test_tracking.py`, `mini_project/track_report.py`)
+
+```bash
+cd ~/turtlebot4_ws && colcon test --packages-select mini_project --pytest-args test/test_tracking.py && colcon test-result --verbose
+```
+
+| 단계 | 내용 | 통과 기준 |
+|---|---|---|
+| 1. 좌표 계산 | 가짜 K·depth·TF(map←odom 회전·이동 포함)로 `car_in_map` → 차/카메라 map 좌표, 카메라 yaw 3 × 거리·방위 3 | 오차 1cm 이하 |
+| 2. 회전 중 안정성 | 1rad/s 제자리 회전, 영상 지연 0.06/0.12/0.2s, 정지한 차(1.5m) 8Hz 측정 | rgb 시각 TF: 편차 2cm 이하. 최신 TF(이전 방식)는 0.1m 넘게 튀는 것도 확인 |
+| 3. 폐루프 추종 시뮬레이션 | 차: 정지, 0.5m 계단 이동, 0.1/0.2 m/s 직선, 0.15 m/s 원호, 0.4 m/s. 로봇: Nav2 근사(최대 0.26m/s·1rad/s, goal 허용 0.1m/0.25rad, 후진 없음), 8Hz·0.12s 지연·3cm 노이즈 측정, 시야각 ±35°·0.8~4m 밖이면 미감지 | 정지/계단: 최종 거리 1.0±0.12m, 0.1/0.2 m/s·원호: 5s 이후 거리 1.5m 이하, 놓침 0. 0.4 m/s: 따라가지 못함(한계 기록) |
+| 4. 실기 로그 분석 | `ros2 run mini_project track_report [로그]` (인자 없으면 `~/.ros/log`의 최신 mission 로그) | 지표만 출력: TRACK 시간·진입/FIND 횟수, goal 전송 Hz, depth 분포, 정지 구간 car map std, TF 실패 로그 수. 파서는 테스트 4에서 검증 |
+
+- 3단계 시뮬레이션 결과(정상 상태 거리): 정지 1.03m, 0.1 m/s 1.16m, 0.2 m/s 1.26m, 원호 1.13~1.17m, 0.4 m/s 놓침. 모델은 Nav2 근사라 실기 성능과 같지 않다 — 알고리즘 변경 시 회귀 확인용
+- 실기 기준값 (2026-10-07, `track_report`): TRACK 39.7s, goal 8.6Hz, 정지 구간 19.2s 동안 car map std 0.6~0.7cm, TF 실패 0
+- `rokey_venv`의 pytest 9와 ROS `launch_testing` 플러그인이 충돌해 `setup.cfg`에 `addopts = -p no:launch_testing -p no:launch_ros`를 둠
+
 ### 실행 방법
 
 ```bash

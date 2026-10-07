@@ -35,6 +35,7 @@ setup(
             'align_check = mini_project.align_check:main',
             'webcam_calib = mini_project.webcam_calib:main',
             'mission = mini_project.mission:main',
+            'track_report = mini_project.track_report:main',
         ],
     },
 )
