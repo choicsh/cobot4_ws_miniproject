@@ -50,15 +50,18 @@ WAIT_CAR  -> webcam 프레임마다 YOLO, 'car' conf>=0.5가 최근 10프레임 
 UNDOCK    -> navigator.undock() 후 UNDOCKED_POSE로 초기 위치 설정 (도크에서는 라이다 꺼짐)
 LOCALIZE  -> 새 amcl_pose 수신 후 waitUntilNav2Active()
 NAVIGATE  -> 차량 map 좌표에서 접근 GOAL을 계산해 goToPose(GOAL), NAVIGATING에서 완료 대기
-TRACK     -> 로봇 카메라 YOLO bbox + depth로 cmd_vel P 제어
+TRACK     -> 로봇 카메라 YOLO bbox + depth → 카메라 TF로 차 map 좌표 → goToPose(차 앞 APPROACH_DIST)
 FIND      -> 마지막으로 본 방향으로 제자리 회전, T초 안에 다시 보이면 TRACK
 ```
 
 - `TurtleBot4Navigator(namespace='/robot5')` 노드 하나에 카메라 subscription도 붙인다. navigator의 blocking 호출과 executor가 충돌하지 않게 하려는 것.
-- TRACK 제어:
-  - `angular.z = -Kp_ang * (cx - W/2) / (W/2)`
-  - `linear.x = Kp_lin * (depth - TARGET_DIST)`, 0 ~ `MAX_LIN`으로 clamp
+- TRACK 제어 (Nav2 goToPose):
   - depth는 bbox 중앙 영역 depth의 median (0과 범위 밖 값은 제외)
+  - bbox 중심 (u, v)와 depth z를 `oakd/rgb/camera_info`의 K로 역투영: `X=(u-cx)z/fx, Y=(v-cy)z/fy, Z=z` (camera optical frame, frame_id는 depth 메시지 header)
+  - `tf_buffer.lookup_transform('map', frame, Time())` 한 번으로 차 map 좌표(`do_transform_point`)와 카메라 map 위치(translation)를 같이 얻는다
+  - `approach_goal(카메라 위치, 차 위치, APPROACH_DIST=1.4m)`로 goal을 만들어 `goToPose`. 차가 직전 goal 기준에서 `REGOAL_DIST`(0.2m) 이상 움직였을 때만 다시 보낸다 (새 goal이 이전 goal을 대체)
+  - `# ponytail: 최신 TF 사용 (spin_once 루프라 timeout 대기 불가). 회전 중 수 cm 오차, 문제되면 MultiThreadedExecutor + depth stamp + timeout`
+  - TransformListener는 절대 토픽 `/tf`를 구독하므로 `main()`의 `rclpy.init`에서 `/tf:=/robot5/tf`, `/tf_static:=/robot5/tf_static`으로 remap
   - rgb와 depth 모두 **704x704**로 OAK-D 내부에서 align되어 있다 (`align_check.py`로 확인함). bbox 픽셀 좌표를 depth에 그대로 쓴다. 크기가 다르면 에러를 내고 해당 프레임은 건너뛴다.
   - cmd_vel은 `geometry_msgs/TwistStamped`, 토픽은 `/robot5/cmd_vel`
   - 입력 토픽은 항상 압축된 것을 쓴다 (`qos_profile_sensor_data`):
@@ -66,9 +69,9 @@ FIND      -> 마지막으로 본 방향으로 제자리 회전, T초 안에 다�
     - depth: `/robot5/oakd/stereo/image_raw/compressedDepth` (`CompressedImage`). 디코드는 `depth_floor_ransac.py`의 방식 그대로: 12바이트 헤더를 버리고 PNG를 디코드하면 16UC1 mm 값
     - rgb와 depth의 짝은 가장 최근에 받은 depth를 쓴다. `# ponytail: stamp 동기화 없음. 빠르게 움직일 때 어긋나면 message_filters.ApproximateTimeSynchronizer 사용`
 - 감지 판정은 슬라이딩 윈도우(K-of-N): webcam 7/10, 로봇 카메라(NAVIGATING/FIND → TRACK) 5/10. 상태가 바뀌면 윈도우를 비운다.
-- TRACK에서 depth가 무효(stamp 차이 > `MAX_DT`, 유효 픽셀 없음)면 0.3초(`DEPTH_HOLD_SEC`) 안의 마지막 유효 거리를 쓴다.
-- TRACK에 들어가기 전에 `navigator.cancelTask()`를 호출한다. Nav2와 cmd_vel이 겹치지 않게 하기 위해서다.
-- 조정 값(`Kp`, `TARGET_DIST`, `APPROACH_DIST`, conf, N, T)은 파일 상단 상수 또는 ros2 파라미터로 둔다. 실제 로봇에서 튜닝해야 한다.
+- TRACK에서 depth 무효(stamp 차이 > `MAX_DT`, 유효 픽셀 없음), camera_info 없음, TF 실패인 프레임은 건너뛰고 진행 중인 goal을 유지한다.
+- FIND에 들어갈 때 `navigator.cancelTask()`를 호출한다. TRACK의 Nav2 goal과 FIND의 cmd_vel 회전이 겹치지 않게 하기 위해서다.
+- 조정 값(`APPROACH_DIST`, `REGOAL_DIST`, conf, N, T)은 파일 상단 상수 또는 ros2 파라미터로 둔다. 실제 로봇에서 튜닝해야 한다.
 
 ## webcam 위치 매핑 (webcam 픽셀 → map 좌표)
 
@@ -125,12 +128,12 @@ webcam은 맵 바깥 회색(unknown) 영역에 고정되어 맵 안쪽 바닥을
 | 1 | localization + nav2 실행 (아래 "실행 방법" 1~2) 후 `nav_to_pose.py`의 좌표를 수정해 실행. undock → 임의 지점 이동 | 로봇이 지점에 도착 | 실기 확인 필요 |
 | 1.5 | `ros2 run mini_project webcam_calib`로 H 생성 → `~/maps/webcam_H.npy` | 재투영 오차 10cm 이하. 다른 위치에 로봇을 세웠을 때 변환 좌표와 amcl_pose 차이가 15cm 이하 (H가 있으면 클릭할 때 오차가 출력됨) | H 생성 완료 (2026-10-06). 검증점 15cm 확인 필요 |
 | 2 | `mission.py`: WAIT_CAR → UNDOCK → NAVIGATE(ING) | 차를 바닥에 놓으면 로봇이 차 앞으로 가서 차를 바라봄 | 코드 완료, 실기 확인 필요 |
-| 3 | `mission.py` TRACK 회전 (`KP_ANG`) | 차를 좌우로 옮기면 로봇이 따라 돎 | 코드 완료, 실기 확인 필요 |
-| 4 | `mission.py` TRACK 전진 (`KP_LIN`, `TARGET_DIST` = 1.0m, 카메라 기준). 후진은 안 함. 카메라가 몸통 뒤쪽에 있어 0.8m 안쪽은 차가 화면 하단에 잘림 (실측) | 일정 거리 유지, 너무 가까우면 정지 | 코드 완료, 실기 확인 필요 |
+| 3 | `mission.py` TRACK 좌표: `rgb/camera_info`가 704x704인지, depth `frame_id` 확인 (시작 로그 `camera_info WxH, frame ...`) 후 TRACK 로그의 `car map (x, y)`가 rviz에서 실제 차 위치와 맞는지 | 오차 15cm 이하 | 코드 완료, 실기 확인 필요 |
+| 4 | `mission.py` TRACK goToPose (`APPROACH_DIST` = 1.4m, 추후 1.0m 등 조정 검토: inflation 반경 확인 필요) | 차를 옮기면 로봇이 차 앞 1.4m로 다시 가서 차를 바라봄 | 코드 완료, 실기 확인 필요 |
 | 5 | `mission.py` FIND: 마지막으로 본 방향으로 회전. 한 바퀴(`FIND_SEC`) 돌아도 없으면 WAIT_CAR로 돌아가 webcam으로 위치를 다시 잡음 | 차를 가리면 회전하고, 다시 보이면 TRACK | 코드 완료, 실기 확인 필요 |
 | 6 | 통합 테스트 + 파라미터 튜닝, 시연 bag 녹화 (`record_bag.py`) | 처음부터 끝까지 3회 연속 성공 | |
 
-체크: `ros2 run mini_project mission --selftest` (approach_goal, track_cmd), `ros2 run mini_project webcam_calib --selftest` (homography)
+체크: `ros2 run mini_project mission --selftest` (approach_goal, pixel_to_cam), `ros2 run mini_project webcam_calib --selftest` (homography)
 
 ### 실행 방법
 
@@ -150,7 +153,7 @@ ROS_SUPER_CLIENT=False ros2 run mini_project mission
 
 - 캘리브레이션 중 로봇을 손으로 들어 옮기지 않는다. amcl은 주행으로만 위치를 갱신하므로 손으로 옮기면 amcl_pose가 틀어진다.
 - `mission.py`의 조정 값은 모두 파일 상단 상수에 있다.
-- NAVIGATING 중에 로봇 카메라에 차가 보이면 Nav2를 취소하고 바로 TRACK으로 넘어간다.
+- NAVIGATING 중에 로봇 카메라에 차가 보이면 바로 TRACK으로 넘어간다. TRACK의 첫 goal이 webcam 기준 goal을 대체한다.
 
 ## 역할 분담 (예시)
 

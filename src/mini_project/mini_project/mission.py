@@ -7,8 +7,11 @@ from types import SimpleNamespace
 
 import rclpy
 from rclpy.qos import qos_profile_sensor_data
-from geometry_msgs.msg import PoseWithCovarianceStamped, TwistStamped
-from sensor_msgs.msg import CompressedImage
+from rclpy.time import Time
+from geometry_msgs.msg import PointStamped, PoseWithCovarianceStamped, TwistStamped
+from sensor_msgs.msg import CameraInfo, CompressedImage
+from tf2_geometry_msgs import do_transform_point
+from tf2_ros import Buffer, TransformException, TransformListener
 from turtlebot4_navigation.turtlebot4_navigator import TurtleBot4Navigator
 from ultralytics import YOLO
 import numpy as np
@@ -28,12 +31,9 @@ CAR_CLASS = 'car'
 CONF = 0.8
 WEBCAM_N, WEBCAM_K = 10, 7  # webcam: 최근 N프레임 중 K개 이상 car면 출발 (좌표는 감지된 것들의 median)
 ROBOT_N, ROBOT_K = 10, 5    # 로봇 카메라: NAVIGATING/FIND에서 최근 N프레임 중 K개 이상이면 TRACK
-APPROACH_DIST = 1.4       # 차 앞 몇 m 지점을 Nav2 GOAL로 (costmap inflation보다 크게)
-TARGET_DIST = 1.0         # TRACK에서 유지할 거리 (m, 카메라 기준). 0.8m 안쪽은 차가 화면 하단에 잘림 (실측)
-KP_ANG, MAX_ANG = 1.2, 1.0   # rad/s
-KP_LIN, MAX_LIN = 0.6, 0.25  # m/s, 후진은 안 함
+APPROACH_DIST = 1.4       # 차 앞 몇 m 지점을 Nav2 GOAL로 (costmap inflation보다 크게). NAVIGATE/TRACK 공용
+REGOAL_DIST = 0.2         # TRACK: 차 map 좌표가 직전 goal 기준보다 이만큼 움직이면 goal 다시 보냄 (m)
 LOST_SEC = 0.7            # 이 시간 동안 안 보이면 FIND
-DEPTH_HOLD_SEC = 0.3      # depth가 무효인 프레임은 이 시간 안의 마지막 유효 거리 사용
 MAX_DT = 0.1              # rgb와 depth stamp 차이가 이보다 크면 depth 안 씀 (s)
 FIND_ANG = 0.3            # FIND 회전 속도 (rad/s)
 FIND_SEC = 2 * math.pi / FIND_ANG + 1.0  # 한 바퀴 돌아도 없으면 webcam으로 다시 찾기
@@ -68,15 +68,9 @@ def approach_goal(robot_xy, car_xy, dist=APPROACH_DIST):
     return robot_xy[0] + dx * k, robot_xy[1] + dy * k, math.atan2(dy, dx)
 
 
-def track_cmd(cx, width, dist_m):
-    """bbox 중심 x, 이미지 폭, 거리 [m] (0=모름) -> (linear, angular)."""
-    err = (cx - width / 2) / (width / 2)  # -1(왼쪽) ~ 1(오른쪽)
-    ang = float(np.clip(-KP_ANG * err, -MAX_ANG, MAX_ANG))
-    if dist_m <= 0:
-        return 0.0, ang
-    # 많이 틀어져 있으면 먼저 돌고 나서 전진
-    lin = float(np.clip(KP_LIN * (dist_m - TARGET_DIST), 0.0, MAX_LIN)) * max(0.0, 1 - abs(err))
-    return lin, ang
+def pixel_to_cam(u, v, z, K):
+    """픽셀 (u,v) + depth z [m] -> camera optical frame (x 오른쪽, y 아래, z 앞) [m]."""
+    return (u - K[0, 2]) * z / K[0, 0], (v - K[1, 2]) * z / K[1, 1], z
 
 
 class Mission:
@@ -89,6 +83,9 @@ class Mission:
                               self.rgb_callback, qos_profile_sensor_data)
         n.create_subscription(CompressedImage, 'oakd/stereo/image_raw/compressedDepth',
                               self.depth_callback, qos_profile_sensor_data)
+        # depth는 rgb 기준으로 align(704x704)되어 있으므로 rgb의 K 사용
+        n.create_subscription(CameraInfo, 'oakd/rgb/camera_info', self.camera_info_callback,
+                              qos_profile_sensor_data)
         n.create_subscription(PoseWithCovarianceStamped, 'amcl_pose', self.amcl_callback, AMCL_QOS)
 
         self.H = np.load(H_PATH)
@@ -96,21 +93,24 @@ class Mission:
         self.webcam.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # WAIT_CAR 재진입 시 오래된 프레임 방지
         self.webcam_model = YOLO(WEBCAM_MODEL)
         self.robot_model = YOLO(ROBOT_MODEL)
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, n)  # /tf -> /robot5/tf remap은 main()
 
         self.rgb_msg = None
         self.depth_mm = None
         self.depth_stamp = 0.0
+        self.depth_frame = ''
+        self.K = None
         self.rgb_stamp = 0.0
         self.robot_xy = None
         self.amcl_fresh = False  # 마지막 undock 이후 amcl_pose를 받았는지
         self.localized = False
         self.pose_set = False  # mission이 초기 위치를 직접 설정했는지
         self.car_xy = None
+        self.goal_car = None  # TRACK: 마지막 goal을 보낼 때의 차 map 좌표
         self.webcam_win = deque(maxlen=WEBCAM_N)  # 프레임마다 car map 좌표 또는 None
         self.robot_win = deque(maxlen=ROBOT_N)    # 프레임마다 car bbox 또는 None
-        self.last_dist = 0.0
         self.raw_dist = 0.0
-        self.last_dist_t = 0.0
         self.last_seen = 0.0
         self.last_dir = 1.0  # 마지막으로 본 방향 (+: 왼쪽 회전)
         self.find_start = 0.0
@@ -126,6 +126,12 @@ class Mission:
         if d is not None:
             self.depth_mm = d
             self.depth_stamp = stamp_sec(msg)
+            self.depth_frame = msg.header.frame_id
+
+    def camera_info_callback(self, msg):
+        if self.K is None:
+            self.nav.info(f'camera_info {msg.width}x{msg.height}, frame {msg.header.frame_id}')
+        self.K = np.array(msg.k).reshape(3, 3)
 
     def amcl_callback(self, msg):
         p = msg.pose.pose.position
@@ -139,6 +145,7 @@ class Mission:
         # 이전 상태의 감지 기록이 다음 상태 판정에 섞이지 않도록
         self.webcam_win.clear()
         self.robot_win.clear()
+        self.goal_car = None  # TRACK에 들어오면 첫 유효 좌표로 바로 goal
 
     def publish(self, lin, ang):
         msg = TwistStamped()
@@ -165,14 +172,6 @@ class Mission:
     def robot_seen(self):
         return len(hits(self.robot_win)) >= ROBOT_K
 
-    def track_dist(self, box, shape, now):
-        """box_depth가 무효(0)면 DEPTH_HOLD_SEC 안의 마지막 유효 거리, 그것도 없으면 0."""
-        d = self.box_depth(box, shape)
-        if d > 0:
-            self.last_dist, self.last_dist_t = d, now
-            return d
-        return self.last_dist if now - self.last_dist_t <= DEPTH_HOLD_SEC else 0.0
-
     def box_depth(self, box, shape):
         """bbox 중앙 영역 depth median [m], 모르면 0."""
         if self.depth_mm is None:
@@ -191,7 +190,29 @@ class Mission:
             return 0.0
         return raw
 
+    def car_in_map(self, box, shape):
+        """bbox -> (카메라 map xy, 차 map xy), depth/K/TF 중 하나라도 없으면 None."""
+        if self.K is None:
+            self.nav.get_logger().warn('camera_info 대기 중', throttle_duration_sec=1.0)
+            return None
+        z = self.box_depth(box, shape)
+        if z <= 0:
+            return None
+        try:
+            # ponytail: depth stamp가 아닌 최신 TF 사용 (spin_once 루프라 timeout 대기 불가).
+            # 회전 중 수 cm 오차, 문제되면 MultiThreadedExecutor + depth stamp + timeout
+            tf = self.tf_buffer.lookup_transform('map', self.depth_frame, Time())
+        except TransformException as e:
+            self.nav.get_logger().warn(f'TF map <- {self.depth_frame!r} 실패: {e}', throttle_duration_sec=1.0)
+            return None
+        pt = PointStamped()
+        pt.point.x, pt.point.y, pt.point.z = pixel_to_cam((box[0] + box[2]) / 2, (box[1] + box[3]) / 2, z, self.K)
+        p = do_transform_point(pt, tf).point
+        t = tf.transform.translation
+        return (t.x, t.y), (p.x, p.y)
+
     def start_find(self):
+        self.nav.cancelTask()  # TRACK의 Nav2 goal과 FIND의 cmd_vel이 겹치지 않도록 (끝난 goal이면 무시됨)
         self.find_start = time.monotonic()
         self.set_state('FIND')
 
@@ -253,8 +274,7 @@ class Mission:
 
     def do_navigating(self):
         f = self.robot_frame()
-        if f is not None and self.robot_seen():  # 가는 도중 로봇 카메라에 보이면 바로 추적
-            self.nav.cancelTask()
+        if f is not None and self.robot_seen():  # 가는 도중 로봇 카메라에 보이면 바로 추적 (goal은 TRACK이 덮어씀)
             self.nav.info('로봇 카메라 감지: map상 로봇-차 거리 {:.2f} m'.format(
                 math.dist(self.robot_xy, self.car_xy)))
             self.last_seen = time.monotonic()
@@ -271,16 +291,23 @@ class Mission:
         if box is None:
             if now - self.last_seen > LOST_SEC:
                 self.start_find()
-            return  # 잠깐 놓친 건 직전 명령 유지
+            return  # 잠깐 놓친 건 진행 중인 goal 유지
         self.last_seen = now
-        dist = self.track_dist(box, shape, now)
-        lin, ang = track_cmd((box[0] + box[2]) / 2, shape[1], dist)
+        if self.K is not None:  # 차가 화면 왼쪽이면 FIND에서 왼쪽(+) 회전
+            self.last_dir = 1.0 if (box[0] + box[2]) / 2 < self.K[0, 2] else -1.0
+        r = self.car_in_map(box, shape)
+        if r is None:
+            return  # depth/TF 무효 프레임은 건너뜀 (기존 goal 유지)
+        cam_xy, car_xy = r
         self.nav.get_logger().info(
-            f'TRACK depth raw {self.raw_dist:.2f} m, used {dist:.2f} m | lin {lin:.2f} ang {ang:+.2f} | '
-            f'bbox y2 {box[3]:.0f}/{shape[0]}', throttle_duration_sec=0.5)
-        if abs(ang) > 0.05:
-            self.last_dir = math.copysign(1.0, ang)
-        self.publish(lin, ang)
+            f'TRACK depth {self.raw_dist:.2f} m | car map ({car_xy[0]:.2f}, {car_xy[1]:.2f})',
+            throttle_duration_sec=0.5)
+        if self.goal_car is not None and math.dist(car_xy, self.goal_car) < REGOAL_DIST:
+            return
+        x, y, yaw = approach_goal(cam_xy, car_xy)
+        self.nav.info(f'TRACK goal ({x:.2f}, {y:.2f}, {math.degrees(yaw):.0f} deg)')
+        self.nav.goToPose(self.nav.getPoseStamped([x, y], math.degrees(yaw)))
+        self.goal_car = car_xy
 
     def do_find(self):
         f = self.robot_frame()
@@ -302,14 +329,10 @@ def selftest():
     assert abs(x - 1.5) < 1e-9 and abs(y) < 1e-9 and abs(yaw) < 1e-9
     x, y, yaw = approach_goal((1.0, 1.0), (1.0, 1.3), 0.5)  # 이미 가까우면 제자리에서 바라보기만
     assert (x, y) == (1.0, 1.0) and abs(yaw - math.pi / 2) < 1e-9
-    lin, ang = track_cmd(352, 704, TARGET_DIST + 0.5)  # 정면, 멀다 -> 직진만
-    assert ang == 0.0 and lin == MAX_LIN
-    lin, ang = track_cmd(352, 704, TARGET_DIST)  # 목표 거리 -> 정지
-    assert lin == 0.0
-    lin, ang = track_cmd(0, 704, TARGET_DIST + 0.5)  # 왼쪽 끝 -> 왼쪽(+) 회전, 전진 안 함
-    assert ang > 0 and lin == 0.0
-    lin, ang = track_cmd(600, 704, 0.0)  # depth 모름 -> 회전만
-    assert ang < 0 and lin == 0.0
+    K = np.array([[500.0, 0, 352], [0, 500.0, 352], [0, 0, 1]])
+    assert pixel_to_cam(352, 352, 2.0, K) == (0.0, 0.0, 2.0)  # 주점 -> 광축 위
+    x, y, z = pixel_to_cam(602, 102, 2.0, K)  # 오른쪽 위: x = 250*2/500 = 1, y = -250*2/500 = -1
+    assert (x, y, z) == (1.0, -1.0, 2.0)
     # stamp 차이가 MAX_DT를 넘으면 depth 무시 (rclpy 없이 box_depth만 확인)
     m = Mission.__new__(Mission)
     m.depth_mm = np.full((704, 704), 1000, np.uint16)
@@ -318,10 +341,6 @@ def selftest():
     assert abs(m.box_depth((300, 300, 400, 400), (704, 704)) - 1.0) < 1e-9
     m.rgb_stamp = 10.0 + MAX_DT + 0.1
     assert m.box_depth((300, 300, 400, 400), (704, 704)) == 0.0
-    # depth 무효 프레임: DEPTH_HOLD_SEC 안이면 마지막 유효 거리 유지
-    m.last_dist, m.last_dist_t = 0.8, 5.0
-    assert m.track_dist((300, 300, 400, 400), (704, 704), 5.0 + DEPTH_HOLD_SEC - 0.01) == 0.8
-    assert m.track_dist((300, 300, 400, 400), (704, 704), 5.0 + DEPTH_HOLD_SEC + 0.01) == 0.0
     # K-of-N: 중간에 놓친 프레임이 있어도 K개 이상이면 감지
     w = deque([1, None, 1, 1, None, 1, 1, None, None, None], maxlen=ROBOT_N)
     assert len(hits(w)) == ROBOT_K
@@ -348,7 +367,9 @@ def main():
     if '--selftest' in sys.argv:
         selftest()
         return
-    rclpy.init()
+    # TransformListener는 절대 토픽 /tf, /tf_static을 구독 -> 로봇 네임스페이스로 remap
+    rclpy.init(args=sys.argv + ['--ros-args', '-r', f'/tf:={NAMESPACE}/tf',
+                                '-r', f'/tf_static:={NAMESPACE}/tf_static'])
     m = Mission()
     try:
         # 도크(라이다 꺼짐)에서 바로 WAIT_CAR 시작. amcl/Nav2 대기는 undock 뒤 LOCALIZE에서
@@ -359,7 +380,7 @@ def main():
         pass
     finally:
         m.publish(0.0, 0.0)
-        if m.state == 'NAVIGATING':
+        if m.state in ('NAVIGATING', 'TRACK'):
             m.nav.cancelTask()
         m.webcam.release()
         m.nav.destroy_node()
