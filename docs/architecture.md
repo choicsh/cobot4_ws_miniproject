@@ -58,8 +58,9 @@ flowchart LR
 
 | 방향 | 토픽 | 메시지 타입 | QoS | Hz | 사용 상태 | 코드 |
 |---|---|---|---|---|---|---|
-| sub | `/robot5/oakd/rgb/image_raw/compressed` | `sensor_msgs/msg/CompressedImage` (JPEG) | SENSOR | (미확인) | NAVIGATING, TRACK, FIND | `rgb_callback` |
-| sub | `/robot5/oakd/stereo/image_raw/compressedDepth` | `sensor_msgs/msg/CompressedImage` (12B 헤더 + PNG, 16UC1 mm) | SENSOR | 10 (사용자 확인) | TRACK | `depth_callback` |
+| sub | `/robot5/oakd/rgb/image_raw/compressed` | `sensor_msgs/msg/CompressedImage` (JPEG) | SENSOR | 26 (실측, 도착 ~0.06s) | NAVIGATING, TRACK, FIND | `message_filters.Subscriber` → `pair_callback` |
+| sub | `/robot5/oakd/stereo/image_raw/compressedDepth` | `sensor_msgs/msg/CompressedImage` (12B 헤더 + PNG, 16UC1 mm) | SENSOR | 8.2 (실측, 도착 ~0.13s) | NAVIGATING, TRACK, FIND | `message_filters.Subscriber` → `pair_callback` |
+| (짝) | rgb + depth | `ApproximateTimeSynchronizer` (queue 10, slop 0.05s) | | 8.2 (실측, stamp 차이 median 1.6ms) | 로봇 카메라 처리 전체 | `pair_callback(rgb, depth)` |
 | sub | `/robot5/oakd/stereo/camera_info` | `sensor_msgs/msg/CameraInfo` (704x704, rgb가 이 기준으로 align) | SENSOR | (미확인) | TRACK (K) | `camera_info_callback` |
 | sub | `/robot5/map` | `nav_msgs/msg/OccupancyGrid` (0 빈칸, 100 벽, -1 unknown) | RELIABLE, TRANSIENT_LOCAL, depth 1 (`AMCL_QOS`) | 1회 (map_server) | NAVIGATE | `map_callback` |
 | sub | `/robot5/amcl_pose` | `geometry_msgs/msg/PoseWithCovarianceStamped` | RELIABLE, TRANSIENT_LOCAL, depth 1 (`AMCL_QOS`) | 이동 시에만 발행 (미확인) | LOCALIZE, NAVIGATE | `amcl_callback` (+ navigator 내부 구독) |
@@ -134,7 +135,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["rgb_callback: CompressedImage<br/>data: bytes (JPEG), header.stamp: builtin_interfaces/Time"] --> B["self.rgb_msg (최신 1개만, 이전 것 덮어씀)"]
+    A["pair_callback(rgb, depth): ApproximateTimeSynchronizer 짝<br/>rgb.data: bytes (JPEG), header.stamp: builtin_interfaces/Time"] --> B["self.rgb_msg + depth_mm 같은 짝으로 갱신 (최신 1쌍만)"]
     B --> C["robot_frame()<br/>rgb_stamp = sec + nanosec*1e-9 : float [s]<br/>cv2.imdecode -> np.ndarray uint8 (704,704,3) BGR"]
     C --> D["robot_model(img, conf=0.8)<br/>ultralytics Results, cv2.imshow('robot')"]
     D --> E["best_car -> box: list[float] x4 | None"]
@@ -147,11 +148,11 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    D0["depth_callback: CompressedImage (compressedDepth)<br/>data[12:] = PNG"] --> D1["cv2.imdecode(IMREAD_UNCHANGED)<br/>depth_mm: np.ndarray uint16 (704,704) [mm], 0 = 무효<br/>depth_stamp: float [s], depth_frame: str"]
+    D0["pair_callback의 depth: CompressedImage (compressedDepth)<br/>data[12:] = PNG"] --> D1["cv2.imdecode(IMREAD_UNCHANGED)<br/>depth_mm: np.ndarray uint16 (704,704) [mm], 0 = 무효<br/>depth_frame: str"]
     K0["camera_info_callback: CameraInfo<br/>k: float64[9], width/height: uint32"] --> K1["K: np.ndarray float64 (3,3)<br/>fx=K[0,0], fy=K[1,1], cx=K[0,2], cy=K[1,2]"]
     BOX["box: list[float] x4 (x1,y1,x2,y2) px"] --> Z
     D1 --> Z["box_depth(box, shape)<br/>depth_at(depth_mm, u, v, patch)<br/>patch = max(2, min(w,h)/6) px<br/>(2p+1)^2 영역에서 0 < d < MAX_DEPTH_MM 4000 인 값의 median / 1000<br/>-> z: float [m], 0 = 무효"]
-    Z --> CHK{"rgb/depth 크기 같음<br/>and |rgb_stamp - depth_stamp| <= MAX_DT 0.1s<br/>and z > 0 ?"}
+    Z --> CHK{"rgb/depth 크기 같음<br/>and z > 0 ?"}
     CHK -- no --> SKIP["프레임 건너뜀<br/>(진행 중 goal 유지)"]
     CHK -- yes --> P["pixel_to_cam(u, v, z, K)<br/>X=(u-cx)z/fx, Y=(v-cy)z/fy, Z=z<br/>-> tuple[float,float,float] [m]<br/>camera optical frame (x 오른쪽, y 아래, z 앞)"]
     K1 --> P
@@ -237,11 +238,11 @@ flowchart LR
 | `webcam_model`, `robot_model` | `ultralytics.YOLO` | | `__init__` | `do_wait_car`, `robot_frame` | 클래스 `{0:'car', 1:'dummy'}` |
 | `tf_buffer` | `tf2_ros.Buffer` | | `__init__` | `car_in_map` | 기본 캐시 10s |
 | `tf_listener` | `tf2_ros.TransformListener` (`spin_thread=True`) | | `__init__` | | 전용 내부 노드 + 스레드에서 `/tf`, `/tf_static` 구독 (메인 루프와 무관하게 버퍼 갱신) |
-| `rgb_msg` | `CompressedImage \| None` | | `rgb_callback` | `robot_frame` (꺼내고 None) | 미처리 최신 rgb |
+| `rgb_msg` | `CompressedImage \| None` | | `pair_callback` | `robot_frame` (꺼내고 None) | 미처리 최신 짝의 rgb |
 | `rgb_stamp` | `float` | s | `robot_frame` | `box_depth` | 처리 중 rgb stamp |
-| `depth_mm` | `np.ndarray uint16 (704,704) \| None` | mm | `depth_callback` | `box_depth` | 최신 depth |
-| `depth_stamp` | `float` | s | `depth_callback` | `box_depth` | |
-| `depth_frame` | `str` | | `depth_callback` | `car_in_map` | TF source frame |
+| `depth_mm` | `np.ndarray uint16 (704,704) \| None` | mm | `pair_callback` | `box_depth` | 최신 짝의 depth |
+| `depth_frame` | `str` | | `pair_callback` | `car_in_map` | TF source frame |
+| `rgb_sub`, `depth_sub`, `sync` | `message_filters.Subscriber` x2, `ApproximateTimeSynchronizer` | | `__init__` | | rgb-depth 짝 맞춤 |
 | `K` | `np.ndarray float64 (3,3) \| None` | px | `camera_info_callback` | `car_in_map`, `do_track` | stereo(depth) intrinsics (rgb도 이 기준) |
 | `robot_xy` | `tuple[float,float] \| None` | m (map) | `amcl_callback` | `do_navigate`, `do_navigating` 로그 | amcl 로봇 위치 |
 | `amcl_fresh` | `bool` | | `amcl_callback`, `do_undock` | `do_localize` | undock 이후 amcl_pose 수신 여부 |
@@ -278,7 +279,7 @@ flowchart LR
 | `REGOAL_DIST` | 0.1 | m | TRACK goal 재전송 임계 이동량. nav2 `xy_goal_tolerance`(0.1)와 맞춤 | O |
 | `LOST_SEC` | 0.7 | s | 못 보면 FIND | O |
 | `MAX_DEPTH_MM` | 4000 | mm | TRACK depth ROI에서 이 이상(먼 벽/배경) 제외 | O |
-| `MAX_DT` | 0.1 | s | rgb/depth stamp 허용 차이 | O (depth 10Hz라 0.15 검토) |
+| `SYNC_SLOP` | 0.05 | s | rgb-depth 짝 맞춤 허용 stamp 차이 (실측 짝 차이 ≤ 31ms) | |
 | `FIND_ANG` | 0.3 | rad/s | FIND 회전 속도 | O |
 | `FIND_SEC` | 2π/0.3 + 1 ≈ 21.9 | s | 한 바퀴 돌아도 없으면 WAIT_CAR | |
 | `UNDOCKED_POSE` | (0.0, 0.0, 180.0) | m, m, deg | undock 직후 초기 위치 (None = rviz 수동) | 도크 옮기면 재측정 |

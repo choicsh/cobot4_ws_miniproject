@@ -9,6 +9,7 @@ import rclpy
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
+from message_filters import ApproximateTimeSynchronizer, Subscriber
 from geometry_msgs.msg import PointStamped, PoseWithCovarianceStamped, TwistStamped
 from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import CameraInfo, CompressedImage
@@ -43,7 +44,7 @@ REGOAL_DIST = 0.1         # TRACK: 차 map 좌표가 직전 goal 기준보다 �
 #                           Nav2 xy_goal_tolerance(config/nav2.yaml 0.1)보다 작으면 새 goal이 바로 도착 처리됨
 LOST_SEC = 0.7            # 이 시간 동안 안 보이면 FIND
 MAX_DEPTH_MM = 4000        # TRACK depth: 이 거리 이상(먼 벽/배경) 픽셀은 ROI median에서 제외 (mm)
-MAX_DT = 0.1              # rgb와 depth stamp 차이가 이보다 크면 depth 안 씀 (s)
+SYNC_SLOP = 0.05          # rgb-depth 짝 맞춤 허용 stamp 차이 (s). 실측: depth마다 rgb가 10.6ms 차이로 존재
 FIND_ANG = 0.3            # FIND 회전 속도 (rad/s)
 FIND_SEC = 2 * math.pi / FIND_ANG + 1.0  # 한 바퀴 돌아도 없으면 webcam으로 다시 찾기
 # undock 직후 map 자세 (x, y, yaw_deg). my_map은 undock 위치에서 SLAM을 시작해 위치는 원점, 방향은 실측 180°.
@@ -125,10 +126,14 @@ class Mission:
         n = self.nav
         # 네임스페이스 상대 토픽 -> /robot5/...
         self.cmd_pub = n.create_publisher(TwistStamped, 'cmd_vel', 10)
-        n.create_subscription(CompressedImage, 'oakd/rgb/image_raw/compressed',
-                              self.rgb_callback, qos_profile_sensor_data)
-        n.create_subscription(CompressedImage, 'oakd/stereo/image_raw/compressedDepth',
-                              self.depth_callback, qos_profile_sensor_data)
+        # rgb(26Hz, 도착 ~0.06s)와 depth(8Hz, 도착 ~0.13s)를 stamp로 짝지어 depth가 도착할 때 같이 처리 (실측).
+        # 최신 rgb를 바로 쓰면 그 시각의 depth/odom TF가 아직 없어 프레임 대부분을 버렸음. 감지도 짝 기준 ~8Hz
+        self.rgb_sub = Subscriber(n, CompressedImage, 'oakd/rgb/image_raw/compressed',
+                                  qos_profile=qos_profile_sensor_data)
+        self.depth_sub = Subscriber(n, CompressedImage, 'oakd/stereo/image_raw/compressedDepth',
+                                    qos_profile=qos_profile_sensor_data)
+        self.sync = ApproximateTimeSynchronizer([self.rgb_sub, self.depth_sub], queue_size=10, slop=SYNC_SLOP)
+        self.sync.registerCallback(self.pair_callback)
         # rgb가 depth(stereo) 기준으로 align(704x704)되어 있으므로 stereo의 K 사용 (depth frame_id와 일치)
         n.create_subscription(CameraInfo, 'oakd/stereo/camera_info', self.camera_info_callback,
                               qos_profile_sensor_data)
@@ -147,7 +152,6 @@ class Mission:
 
         self.rgb_msg = None
         self.depth_mm = None
-        self.depth_stamp = 0.0
         self.depth_frame = ''
         self.K = None
         self.rgb_stamp = 0.0
@@ -167,16 +171,11 @@ class Mission:
         self.state = 'WAIT_CAR'
 
     # ---------- 콜백: 최신 값만 저장 ----------
-    def rgb_callback(self, msg):
-        self.rgb_msg = msg
-
-    def depth_callback(self, msg):
+    def pair_callback(self, rgb, depth):
         # compressedDepth = 12바이트 헤더 + PNG (depth_floor_ransac.py와 동일)
-        d = cv2.imdecode(np.frombuffer(msg.data, np.uint8)[12:], cv2.IMREAD_UNCHANGED)
-        if d is not None:
-            self.depth_mm = d
-            self.depth_stamp = stamp_sec(msg)
-            self.depth_frame = msg.header.frame_id
+        d = cv2.imdecode(np.frombuffer(depth.data, np.uint8)[12:], cv2.IMREAD_UNCHANGED)
+        if d is not None:  # rgb와 depth를 같은 짝으로만 갱신
+            self.rgb_msg, self.depth_mm, self.depth_frame = rgb, d, depth.header.frame_id
 
     def camera_info_callback(self, msg):
         if self.K is None:
@@ -237,12 +236,7 @@ class Mission:
         x1, y1, x2, y2 = box
         patch = max(2, int(min(x2 - x1, y2 - y1) / 6))
         raw = depth_at(self.depth_mm, int((x1 + x2) / 2), int((y1 + y2) / 2), patch, MAX_DEPTH_MM) / 1000.0
-        self.raw_dist = raw  # 측정 로그용 (stamp 검사 전 값)
-        dt = self.rgb_stamp - self.depth_stamp
-        if abs(dt) > MAX_DT:  # 회전 중 어긋난 depth로 차 좌표를 잘못 잡지 않도록 (이 프레임은 건너뜀)
-            self.nav.get_logger().warn(f'rgb-depth stamp 차이 {dt:+.3f}s > {MAX_DT}s, depth 무시',
-                                       throttle_duration_sec=1.0)
-            return 0.0
+        self.raw_dist = raw  # 측정 로그용
         return raw
 
     def car_in_map(self, box, shape):
@@ -409,16 +403,16 @@ def selftest():
     assert pixel_to_cam(352, 352, 2.0, K) == (0.0, 0.0, 2.0)  # 주점 -> 광축 위
     x, y, z = pixel_to_cam(602, 102, 2.0, K)  # 오른쪽 위: x = 250*2/500 = 1, y = -250*2/500 = -1
     assert (x, y, z) == (1.0, -1.0, 2.0)
-    # stamp 차이가 MAX_DT를 넘으면 depth 무시 (rclpy 없이 box_depth만 확인)
+    # pair_callback: rgb와 depth(12B 헤더 + PNG)를 같은 짝으로 저장 (rclpy 없이)
     m = Mission.__new__(Mission)
-    m.depth_mm = np.full((704, 704), 1000, np.uint16)
     m.nav = SimpleNamespace(get_logger=lambda: SimpleNamespace(warn=lambda *a, **k: None))
-    m.rgb_stamp, m.depth_stamp = 10.05, 10.0
+    png = cv2.imencode('.png', np.full((704, 704), 1000, np.uint16))[1].tobytes()
+    rgb_msg = SimpleNamespace(data=b'jpeg')
+    m.pair_callback(rgb_msg, SimpleNamespace(data=bytes(12) + png, header=SimpleNamespace(frame_id='cam')))
+    assert m.rgb_msg is rgb_msg and m.depth_frame == 'cam' and m.depth_mm.dtype == np.uint16
     assert abs(m.box_depth((300, 300, 400, 400), (704, 704)) - 1.0) < 1e-9
     m.depth_mm[:, :360] = MAX_DEPTH_MM + 500  # ROI(열 334~366)의 절반 이상이 먼 벽 -> 제외되고 차(1m)만 남음
     assert abs(m.box_depth((300, 300, 400, 400), (704, 704)) - 1.0) < 1e-9
-    m.rgb_stamp = 10.0 + MAX_DT + 0.1
-    assert m.box_depth((300, 300, 400, 400), (704, 704)) == 0.0
     # car_in_map: map<-odom은 오래된 값(t=1)뿐이어도, odom<-카메라는 rgb 시각(10.5)으로 보간해서 조회
     from geometry_msgs.msg import TransformStamped
     from tf2_ros import Buffer as TfBuffer
@@ -435,10 +429,10 @@ def selftest():
     m.tf_buffer.set_transform(tfs('odom', 'cam', 11.0, 2.0), 'test')  # 카메라가 1초에 2m 이동
     m.K, m.depth_frame = K, 'cam'
     m.depth_mm = np.full((704, 704), 1000, np.uint16)
-    m.rgb_stamp = m.depth_stamp = 10.5
+    m.rgb_stamp = 10.5
     cam_xy, car_xy = m.car_in_map((302, 302, 402, 402), (704, 704))  # 주점 -> 카메라 광축 1m 앞
     assert np.allclose(cam_xy, (2.0, 0.0)) and np.allclose(car_xy, (2.0, 0.0)), (cam_xy, car_xy)
-    m.rgb_stamp = m.depth_stamp = 11.5  # odom 데이터보다 미래 -> 건너뜀
+    m.rgb_stamp = 11.5  # odom 데이터보다 미래 -> 건너뜀
     assert m.car_in_map((302, 302, 402, 402), (704, 704)) is None
     # K-of-N: 중간에 놓친 프레임이 있어도 K개 이상이면 감지
     w = deque([1, None, 1, 1, None, 1, 1, None, None, None], maxlen=ROBOT_N)
