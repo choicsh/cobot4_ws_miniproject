@@ -154,7 +154,7 @@ flowchart TD
     CHK -- no --> SKIP["프레임 건너뜀<br/>(진행 중 goal 유지)"]
     CHK -- yes --> P["pixel_to_cam(u, v, z, K)<br/>X=(u-cx)z/fx, Y=(v-cy)z/fy, Z=z<br/>-> tuple[float,float,float] [m]<br/>camera optical frame (x 오른쪽, y 아래, z 앞)"]
     K1 --> P
-    TF0["tf_buffer.lookup_transform('map', depth_frame, Time())<br/>-> geometry_msgs/TransformStamped (최신 TF)"] --> T
+    TF0["tf_buffer.lookup_transform('map', depth_frame, Time(rgb_stamp))<br/>-> geometry_msgs/TransformStamped (rgb 촬영 시각)"] --> T
     P --> PS["geometry_msgs/PointStamped<br/>point.x/y/z: float64"]
     PS --> T["do_transform_point(pt, tf).point<br/>car_xy: tuple[float,float] map [m]"]
     TF0 --> CAM["tf.transform.translation<br/>cam_xy: tuple[float,float] map [m]"]
@@ -220,8 +220,8 @@ flowchart LR
     CAMLINK --> OPT["camera optical frame<br/>= depth 메시지 header.frame_id<br/>(이름 미확인)"]
 ```
 
-- `car_in_map`은 `lookup_transform('map', depth_frame, Time())` 한 번으로 `map ← optical` 전체 체인을 얻는다.
-- `Time()` = 최신 TF. `# ponytail:` depth stamp 대신 최신 TF라 회전 중 수 cm 오차, 필요하면 MultiThreadedExecutor + stamp + timeout.
+- `car_in_map`은 `lookup_transform('map', depth_frame, rgb_stamp)` 한 번으로 `map ← optical` 전체 체인을 얻는다.
+- 시각 = bbox를 만든 rgb의 촬영 시각 (`Time(nanoseconds=rgb_stamp*1e9)`). 최신 TF(`Time()`)는 회전 중 영상 지연만큼 차 좌표가 좌우로 튀어서(실측 ±40cm) 바꿈. 과거 시각이라 대기(timeout) 없이 조회된다.
 
 ## 7. 내부 상태 변수 (`Mission`)
 

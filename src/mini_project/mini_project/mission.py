@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import rclpy
 from rclpy.qos import qos_profile_sensor_data
+from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
 from geometry_msgs.msg import PointStamped, PoseWithCovarianceStamped, TwistStamped
 from sensor_msgs.msg import CameraInfo, CompressedImage
@@ -203,9 +204,10 @@ class Mission:
         if z <= 0:
             return None
         try:
-            # ponytail: depth stamp가 아닌 최신 TF 사용 (spin_once 루프라 timeout 대기 불가).
-            # 회전 중 수 cm 오차, 문제되면 MultiThreadedExecutor + depth stamp + timeout
-            tf = self.tf_buffer.lookup_transform('map', self.depth_frame, Time())
+            # bbox(방향)를 만든 rgb가 찍힌 시각의 TF. 최신 TF(Time())를 쓰면 회전 중 영상 지연만큼
+            # 차 좌표가 좌우로 튐 (실측 ±40cm). 과거 시각이라 버퍼에 있으므로 대기 없이 조회됨
+            stamp = Time(nanoseconds=round(self.rgb_stamp * 1e9))
+            tf = self.tf_buffer.lookup_transform('map', self.depth_frame, stamp)
         except TransformException as e:
             self.nav.get_logger().warn(f'TF map <- {self.depth_frame!r} 실패: {e}', throttle_duration_sec=1.0)
             return None
@@ -375,8 +377,10 @@ def main():
         selftest()
         return
     # TransformListener는 절대 토픽 /tf, /tf_static을 구독 -> 로봇 네임스페이스로 remap
+    # SignalHandlerOptions.NO: Ctrl+C에 rclpy가 context를 먼저 닫지 않게 함 -> finally의 정지/goal 취소가 실행됨
     rclpy.init(args=sys.argv + ['--ros-args', '-r', f'/tf:={NAMESPACE}/tf',
-                                '-r', f'/tf_static:={NAMESPACE}/tf_static'])
+                                '-r', f'/tf_static:={NAMESPACE}/tf_static'],
+               signal_handler_options=SignalHandlerOptions.NO)
     m = Mission()
     try:
         # 도크(라이다 꺼짐)에서 바로 WAIT_CAR 시작. amcl/Nav2 대기는 undock 뒤 LOCALIZE에서
