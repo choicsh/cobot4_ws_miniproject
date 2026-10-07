@@ -158,12 +158,14 @@ def fig_tracking_sim():
         ('0.5m 계단 이동 (10s)', lambda t: (2.0, 0.0) if t < 10 else (2.0, 0.5), {}),
         ('0.1 m/s 직선', straight(0.1), {}),
         ('0.2 m/s 직선', straight(0.2), {}),
-        ('0.15 m/s 원호', lambda t: (1.5 * math.cos(0.1 * t), 1.5 * math.sin(0.1 * t)), {'robot': (-0.2, -1.2, 1.2)}),
+        ('0.15 m/s 원호', lambda t: (1.5 * math.cos(0.1 * t), 1.5 * math.sin(0.1 * t)),
+         {'robot': (-0.2, -1.2, 1.2)}),
         ('0.4 m/s 직선 (한계)', straight(0.4), {}),
     ]
     fig, ax = plt.subplots(figsize=(9, 4.6))
     ax.axhspan(TRACK_DIST - XY_TOL, TRACK_DIST + XY_TOL, color=GRID, alpha=0.8, lw=0)
-    ax.text(29.6, TRACK_DIST - 0.05, f'TRACK_DIST {TRACK_DIST:g}±{XY_TOL:g}m', ha='right', va='top', color=INK2, fontsize=9)
+    ax.text(29.6, TRACK_DIST - 0.05, f'TRACK_DIST {TRACK_DIST:g}±{XY_TOL:g}m',
+            ha='right', va='top', color=INK2, fontsize=9)
     ax.axhline(1.5, color=INK2, ls='--', lw=1.2)
     ax.text(29.6, 1.53, '이동 차 기준 1.5m', ha='right', va='bottom', color=INK2, fontsize=9)
     rows = []
