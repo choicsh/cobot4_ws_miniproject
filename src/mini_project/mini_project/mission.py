@@ -34,6 +34,7 @@ ROBOT_N, ROBOT_K = 10, 5    # 로봇 카메라: NAVIGATING/FIND에서 최근 N�
 APPROACH_DIST = 1.4       # 차 앞 몇 m 지점을 Nav2 GOAL로 (costmap inflation보다 크게). NAVIGATE/TRACK 공용
 REGOAL_DIST = 0.2         # TRACK: 차 map 좌표가 직전 goal 기준보다 이만큼 움직이면 goal 다시 보냄 (m)
 LOST_SEC = 0.7            # 이 시간 동안 안 보이면 FIND
+MAX_DEPTH_MM = 4000        # TRACK depth: 이 거리 이상(먼 벽/배경) 픽셀은 ROI median에서 제외 (mm)
 MAX_DT = 0.1              # rgb와 depth stamp 차이가 이보다 크면 depth 안 씀 (s)
 FIND_ANG = 0.3            # FIND 회전 속도 (rad/s)
 FIND_SEC = 2 * math.pi / FIND_ANG + 1.0  # 한 바퀴 돌아도 없으면 webcam으로 다시 찾기
@@ -83,8 +84,8 @@ class Mission:
                               self.rgb_callback, qos_profile_sensor_data)
         n.create_subscription(CompressedImage, 'oakd/stereo/image_raw/compressedDepth',
                               self.depth_callback, qos_profile_sensor_data)
-        # depth는 rgb 기준으로 align(704x704)되어 있으므로 rgb의 K 사용
-        n.create_subscription(CameraInfo, 'oakd/rgb/camera_info', self.camera_info_callback,
+        # rgb가 depth(stereo) 기준으로 align(704x704)되어 있으므로 stereo의 K 사용 (depth frame_id와 일치)
+        n.create_subscription(CameraInfo, 'oakd/stereo/camera_info', self.camera_info_callback,
                               qos_profile_sensor_data)
         n.create_subscription(PoseWithCovarianceStamped, 'amcl_pose', self.amcl_callback, AMCL_QOS)
 
@@ -181,7 +182,7 @@ class Mission:
             return 0.0
         x1, y1, x2, y2 = box
         patch = max(2, int(min(x2 - x1, y2 - y1) / 6))
-        raw = depth_at(self.depth_mm, int((x1 + x2) / 2), int((y1 + y2) / 2), patch) / 1000.0
+        raw = depth_at(self.depth_mm, int((x1 + x2) / 2), int((y1 + y2) / 2), patch, MAX_DEPTH_MM) / 1000.0
         self.raw_dist = raw  # 측정 로그용 (stamp 검사 전 값)
         dt = self.rgb_stamp - self.depth_stamp
         if abs(dt) > MAX_DT:  # 회전 중 어긋난 depth로 차 좌표를 잘못 잡지 않도록 (이 프레임은 건너뜀)
@@ -339,6 +340,8 @@ def selftest():
     m.depth_mm = np.full((704, 704), 1000, np.uint16)
     m.nav = SimpleNamespace(get_logger=lambda: SimpleNamespace(warn=lambda *a, **k: None))
     m.rgb_stamp, m.depth_stamp = 10.05, 10.0
+    assert abs(m.box_depth((300, 300, 400, 400), (704, 704)) - 1.0) < 1e-9
+    m.depth_mm[:, :360] = MAX_DEPTH_MM + 500  # ROI(열 334~366)의 절반 이상이 먼 벽 -> 제외되고 차(1m)만 남음
     assert abs(m.box_depth((300, 300, 400, 400), (704, 704)) - 1.0) < 1e-9
     m.rgb_stamp = 10.0 + MAX_DT + 0.1
     assert m.box_depth((300, 300, 400, 400), (704, 704)) == 0.0

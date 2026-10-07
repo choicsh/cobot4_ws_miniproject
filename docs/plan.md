@@ -58,13 +58,13 @@ FIND      -> 마지막으로 본 방향으로 제자리 회전, T초 안에 다�
 
 - `TurtleBot4Navigator(namespace='/robot5')` 노드 하나에 카메라 subscription도 붙인다. navigator의 blocking 호출과 executor가 충돌하지 않게 하려는 것.
 - TRACK 제어 (Nav2 goToPose):
-  - depth는 bbox 중앙 영역 depth의 median (0과 범위 밖 값은 제외)
-  - bbox 중심 (u, v)와 depth z를 `oakd/rgb/camera_info`의 K로 역투영: `X=(u-cx)z/fx, Y=(v-cy)z/fy, Z=z` (camera optical frame, frame_id는 depth 메시지 header)
+  - depth는 bbox 중앙 영역 depth의 median (0과 `MAX_DEPTH_MM` 4m 이상(먼 벽/배경)은 제외). 바닥 평면 필터는 넣지 않음: ROI가 bbox 중앙 1/3이라 차가 45°로 서 있어도 바닥이 거의 들어오지 않음
+  - bbox 중심 (u, v)와 depth z를 `oakd/stereo/camera_info`의 K로 역투영: `X=(u-cx)z/fx, Y=(v-cy)z/fy, Z=z` (camera optical frame, frame_id는 depth 메시지 header)
   - `tf_buffer.lookup_transform('map', frame, Time())` 한 번으로 차 map 좌표(`do_transform_point`)와 카메라 map 위치(translation)를 같이 얻는다
   - `approach_goal(카메라 위치, 차 위치, APPROACH_DIST=1.4m)`로 goal을 만들어 `goToPose`. 차가 직전 goal 기준에서 `REGOAL_DIST`(0.2m) 이상 움직였을 때만 다시 보낸다 (새 goal이 이전 goal을 대체)
   - `# ponytail: 최신 TF 사용 (spin_once 루프라 timeout 대기 불가). 회전 중 수 cm 오차, 문제되면 MultiThreadedExecutor + depth stamp + timeout`
   - TransformListener는 절대 토픽 `/tf`를 구독하므로 `main()`의 `rclpy.init`에서 `/tf:=/robot5/tf`, `/tf_static:=/robot5/tf_static`으로 remap
-  - rgb와 depth 모두 **704x704**로 OAK-D 내부에서 align되어 있다 (`align_check.py`로 확인함). bbox 픽셀 좌표를 depth에 그대로 쓴다. 크기가 다르면 에러를 내고 해당 프레임은 건너뛴다.
+  - rgb와 depth 모두 **704x704**로, **rgb가 depth(stereo) 기준으로** OAK-D 내부에서 align되어 있다 (`align_check.py`, camera_info로 확인함). 그래서 K는 stereo의 것을 쓴다. bbox 픽셀 좌표를 depth에 그대로 쓴다. 크기가 다르면 에러를 내고 해당 프레임은 건너뛴다.
   - cmd_vel은 `geometry_msgs/TwistStamped`, 토픽은 `/robot5/cmd_vel` (FIND 제자리 회전에서만 사용)
   - 입력 토픽은 항상 압축된 것을 쓴다 (`qos_profile_sensor_data`):
     - rgb: `/robot5/oakd/rgb/image_raw/compressed` (`CompressedImage`, `yolo_detection.py` 기본값과 같음)
@@ -130,7 +130,7 @@ webcam은 맵 바깥 회색(unknown) 영역에 고정되어 맵 안쪽 바닥을
 | 1 | localization + nav2 실행 (아래 "실행 방법" 1~2) 후 `nav_to_pose.py`의 좌표를 수정해 실행. undock → 임의 지점 이동 | 로봇이 지점에 도착 | 실기 확인 필요 |
 | 1.5 | `ros2 run mini_project webcam_calib`로 H 생성 → `~/maps/webcam_H.npy` | 재투영 오차 10cm 이하. 다른 위치에 로봇을 세웠을 때 변환 좌표와 amcl_pose 차이가 15cm 이하 (H가 있으면 클릭할 때 오차가 출력됨) | H 생성 완료 (2026-10-06). 검증점 15cm 확인 필요 |
 | 2 | `mission.py`: WAIT_CAR → UNDOCK → NAVIGATE(ING) | 차를 바닥에 놓으면 로봇이 차 앞으로 가서 차를 바라봄 | 코드 완료, 실기 확인 필요 |
-| 3 | `mission.py` TRACK 좌표: `rgb/camera_info`가 704x704인지, depth `frame_id` 확인 (시작 로그 `camera_info WxH, frame ...`) 후 TRACK 로그의 `car map (x, y)`가 rviz에서 실제 차 위치와 맞는지 | 오차 15cm 이하 | 코드 완료, 실기 확인 필요 |
+| 3 | `mission.py` TRACK 좌표: `stereo/camera_info`가 704x704인지, depth `frame_id` 확인 (시작 로그 `camera_info WxH, frame ...`) 후 TRACK 로그의 `car map (x, y)`가 rviz에서 실제 차 위치와 맞는지 | 오차 15cm 이하 | 코드 완료, 실기 확인 필요 |
 | 4 | `mission.py` TRACK goToPose (`APPROACH_DIST` = 1.4m, 추후 1.0m 등 조정 검토: inflation 반경 확인 필요) | 차를 옮기면 로봇이 차 앞 1.4m로 다시 가서 차를 바라봄 | 코드 완료, 실기 확인 필요 |
 | 5 | `mission.py` FIND: 마지막으로 본 방향으로 회전. 한 바퀴(`FIND_SEC`) 돌아도 없으면 WAIT_CAR로 돌아가 webcam으로 위치를 다시 잡음 | 차를 가리면 회전하고, 다시 보이면 TRACK | 코드 완료, 실기 확인 필요 |
 | 6 | 통합 테스트 + 파라미터 튜닝, 시연 bag 녹화 (`record_bag.py`) | 처음부터 끝까지 3회 연속 성공 | |

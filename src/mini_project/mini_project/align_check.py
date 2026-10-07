@@ -27,12 +27,12 @@ def depth_to_heat(depth_mm, near=NEAR_M, far=FAR_M, gamma=GAMMA):
     return ((1 - t) * 255).astype(np.uint8)
 
 
-def depth_at(depth_mm, u, v, patch=PATCH):
-    """(u,v) 주변 patch의 유효(>0) depth median [mm], 없으면 0."""
+def depth_at(depth_mm, u, v, patch=PATCH, max_mm=np.inf):
+    """(u,v) 주변 patch의 유효(0 < d < max_mm) depth median [mm], 없으면 0."""
     h, w = depth_mm.shape
     roi = depth_mm[max(v - patch, 0):min(v + patch + 1, h),
                    max(u - patch, 0):min(u + patch + 1, w)]
-    roi = roi[roi > 0]
+    roi = roi[(roi > 0) & (roi < max_mm)]
     return float(np.median(roi)) if roi.size else 0.0
 
 
@@ -104,6 +104,7 @@ def selftest():
     d[5, 5] = 9999  # 튀는 값 하나는 median이 무시
     assert depth_at(d, 5, 5, patch=1) == 1500
     assert depth_at(d, 0, 0, patch=1) == 0.0  # 유효값 없음
+    assert depth_at(d, 5, 5, patch=1, max_mm=1000) == 0.0  # max_mm 이상은 제외
     heat = depth_to_heat(np.array([100, 500, 1000, 3000]))
     assert heat[0] == 255 and heat[-1] == 0  # NEAR 이하 최대, FAR 이상 최소
     assert heat[0] >= heat[1] > heat[2] > heat[3]  # 가까울수록 큼

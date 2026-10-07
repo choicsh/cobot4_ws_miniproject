@@ -25,7 +25,7 @@ flowchart LR
     subgraph ROBOT["TurtleBot4 (robot5, 192.168.109.105)"]
         direction TB
         DS["Fast DDS Discovery Server<br/>:11811"]
-        OAKD["OAK-D<br/>rgb + stereo depth (rgb 기준 align 704x704)"]
+        OAKD["OAK-D<br/>rgb + stereo depth (rgb를 depth 기준 align 704x704)"]
         LIDAR["RPLidar<br/>/robot5/scan"]
         CREATE["Create3 base<br/>cmd_vel, odom, dock, undock"]
     end
@@ -60,7 +60,7 @@ flowchart LR
 |---|---|---|---|---|---|---|
 | sub | `/robot5/oakd/rgb/image_raw/compressed` | `sensor_msgs/msg/CompressedImage` (JPEG) | SENSOR | (미확인) | NAVIGATING, TRACK, FIND | `rgb_callback` |
 | sub | `/robot5/oakd/stereo/image_raw/compressedDepth` | `sensor_msgs/msg/CompressedImage` (12B 헤더 + PNG, 16UC1 mm) | SENSOR | 10 (사용자 확인) | TRACK | `depth_callback` |
-| sub | `/robot5/oakd/rgb/camera_info` | `sensor_msgs/msg/CameraInfo` | SENSOR | (미확인) | TRACK (K) | `camera_info_callback` |
+| sub | `/robot5/oakd/stereo/camera_info` | `sensor_msgs/msg/CameraInfo` (704x704, rgb가 이 기준으로 align) | SENSOR | (미확인) | TRACK (K) | `camera_info_callback` |
 | sub | `/robot5/amcl_pose` | `geometry_msgs/msg/PoseWithCovarianceStamped` | RELIABLE, TRANSIENT_LOCAL, depth 1 (`AMCL_QOS`) | 이동 시에만 발행 (미확인) | LOCALIZE, NAVIGATE | `amcl_callback` (+ navigator 내부 구독) |
 | sub | `/robot5/dock_status` | `irobot_create_msgs/msg/DockStatus` | SENSOR | (미확인) | UNDOCK | navigator `_dockCallback` |
 | sub | `/robot5/initialpose` | `geometry_msgs/msg/PoseWithCovarianceStamped` | system default | rviz 입력 시 | (navigator 내부) | navigator `_poseEstimateCallback` |
@@ -149,7 +149,7 @@ flowchart TD
     D0["depth_callback: CompressedImage (compressedDepth)<br/>data[12:] = PNG"] --> D1["cv2.imdecode(IMREAD_UNCHANGED)<br/>depth_mm: np.ndarray uint16 (704,704) [mm], 0 = 무효<br/>depth_stamp: float [s], depth_frame: str"]
     K0["camera_info_callback: CameraInfo<br/>k: float64[9], width/height: uint32"] --> K1["K: np.ndarray float64 (3,3)<br/>fx=K[0,0], fy=K[1,1], cx=K[0,2], cy=K[1,2]"]
     BOX["box: list[float] x4 (x1,y1,x2,y2) px"] --> Z
-    D1 --> Z["box_depth(box, shape)<br/>depth_at(depth_mm, u, v, patch)<br/>patch = max(2, min(w,h)/6) px<br/>(2p+1)^2 영역 유효값 median / 1000<br/>-> z: float [m], 0 = 무효"]
+    D1 --> Z["box_depth(box, shape)<br/>depth_at(depth_mm, u, v, patch)<br/>patch = max(2, min(w,h)/6) px<br/>(2p+1)^2 영역에서 0 < d < MAX_DEPTH_MM 4000 인 값의 median / 1000<br/>-> z: float [m], 0 = 무효"]
     Z --> CHK{"rgb/depth 크기 같음<br/>and |rgb_stamp - depth_stamp| <= MAX_DT 0.1s<br/>and z > 0 ?"}
     CHK -- no --> SKIP["프레임 건너뜀<br/>(진행 중 goal 유지)"]
     CHK -- yes --> P["pixel_to_cam(u, v, z, K)<br/>X=(u-cx)z/fx, Y=(v-cy)z/fy, Z=z<br/>-> tuple[float,float,float] [m]<br/>camera optical frame (x 오른쪽, y 아래, z 앞)"]
@@ -239,7 +239,7 @@ flowchart LR
 | `depth_mm` | `np.ndarray uint16 (704,704) \| None` | mm | `depth_callback` | `box_depth` | 최신 depth |
 | `depth_stamp` | `float` | s | `depth_callback` | `box_depth` | |
 | `depth_frame` | `str` | | `depth_callback` | `car_in_map` | TF source frame |
-| `K` | `np.ndarray float64 (3,3) \| None` | px | `camera_info_callback` | `car_in_map`, `do_track` | rgb intrinsics |
+| `K` | `np.ndarray float64 (3,3) \| None` | px | `camera_info_callback` | `car_in_map`, `do_track` | stereo(depth) intrinsics (rgb도 이 기준) |
 | `robot_xy` | `tuple[float,float] \| None` | m (map) | `amcl_callback` | `do_navigate`, `do_navigating` 로그 | amcl 로봇 위치 |
 | `amcl_fresh` | `bool` | | `amcl_callback`, `do_undock` | `do_localize` | undock 이후 amcl_pose 수신 여부 |
 | `localized` | `bool` | | `do_localize` | `do_wait_car` | 한 번 위치를 잡았는지 (재진입 시 UNDOCK 생략) |
@@ -269,6 +269,7 @@ flowchart LR
 | `APPROACH_DIST` | 1.4 | m | goal을 차 앞 몇 m에 둘지 (NAVIGATE/TRACK) | O (1.0 검토, inflation 확인) |
 | `REGOAL_DIST` | 0.2 | m | TRACK goal 재전송 임계 이동량 | O |
 | `LOST_SEC` | 0.7 | s | 못 보면 FIND | O |
+| `MAX_DEPTH_MM` | 4000 | mm | TRACK depth ROI에서 이 이상(먼 벽/배경) 제외 | O |
 | `MAX_DT` | 0.1 | s | rgb/depth stamp 허용 차이 | O (depth 10Hz라 0.15 검토) |
 | `FIND_ANG` | 0.3 | rad/s | FIND 회전 속도 | O |
 | `FIND_SEC` | 2π/0.3 + 1 ≈ 21.9 | s | 한 바퀴 돌아도 없으면 WAIT_CAR | |
@@ -291,8 +292,9 @@ flowchart LR
 
 실기에서 확인 후 이 문서의 해당 칸을 갱신한다.
 
-- [ ] depth 메시지 `header.frame_id`, `rgb/camera_info`의 `width x height`(704x704 기대) — mission 시작 로그 `camera_info WxH, frame ...`
-- [ ] `rgb/camera_info`의 왜곡 계수 `d` (0에 가까우면 보정 불필요)
+- [x] `stereo/camera_info` 704x704, rgb가 depth 기준 align (사용자 확인)
+- [ ] depth 메시지 `header.frame_id` — mission 시작 로그 `camera_info WxH, frame ...`
+- [ ] `stereo/camera_info`의 왜곡 계수 `d` (0에 가까우면 보정 불필요)
 - [ ] rgb compressed Hz, camera_info Hz, tf Hz — `ros2 topic hz` (super client 터미널)
 - [ ] TF 트리 프레임 이름 — `ros2 run tf2_tools view_frames` 또는 rviz TF
 - [ ] webcam 해상도
