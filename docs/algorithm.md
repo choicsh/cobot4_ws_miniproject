@@ -104,6 +104,53 @@ sequenceDiagram
 - goal은 **차 위치 자체**, 1.0m 앞에서 멈추는 건 BT의 `TruncatePath`(경로 끝 1.0m 잘라냄) = `TRACK_DIST`.
 - 도착 판정 `xy_goal_tolerance` 0.1m (`config/nav2.yaml`), 후진 없음, 최대 0.26 m/s.
 
+### 5.1 `config/follow_car.xml` 구조
+
+Nav2 기본 제공 `follow_point.xml`을 복사하고 `RateController hz`만 1.0 → 4.0으로 바꾼 BT.
+
+```mermaid
+flowchart TD
+    PS["PipelineSequence<br/>(왼쪽 자식부터, 앞 자식이 RUNNING이어도 뒤 자식을 계속 tick)"]
+    PS --> CS["ControllerSelector<br/>FollowPath (DWB)"]
+    PS --> PLS["PlannerSelector<br/>GridBased (NavFn)"]
+    PS --> RC["RateController hz=4.0<br/>(0.25s마다 아래 Sequence 실행)"]
+    PS --> KR["KeepRunningUntilFailure<br/>(자식이 SUCCESS여도 다시 RUNNING)"]
+    RC --> SQ["Sequence"]
+    SQ --> GU["GoalUpdater<br/>/robot5/goal_update 구독<br/>{goal} → {updated_goal}"]
+    GU --> CP["ComputePathToPose<br/>현재 위치 → updated_goal(차 위치)<br/>→ {path}"]
+    SQ --> TP["TruncatePath distance=1.0<br/>{path} 끝에서 1.0m 잘라냄<br/>→ {truncated_path}"]
+    KR --> FP["FollowPath<br/>{truncated_path} 추종<br/>(새 경로가 오면 이어받음)"]
+```
+
+| 노드 | 하는 일 | mission과의 관계 |
+|---|---|---|
+| `GoalUpdater` | `goal_update` 토픽의 **마지막 메시지**를 저장해 두고, tick마다 그 pose를 `{updated_goal}`로 내보낸다. 새 메시지의 stamp가 현재 goal보다 오래되면 무시 (`The timestamp of the received goal ... Ignoring the received goal.`) | mission이 유효 프레임마다(~8Hz) 현재 시각 stamp로 차 pose 발행 |
+| `ComputePathToPose` | 로봇 현재 위치 → 차 위치 경로 (NavFn, `tolerance 0.5`: goal이 장애물 안이면 0.5m 안 빈칸까지) | goal = 차 위치 **자체** |
+| `TruncatePath` | 경로 끝(차)에서 1.0m 안쪽 점들을 잘라내고, 새 끝점의 방향을 차 쪽으로 다시 잡는다 (Nav2 구현: 끝점까지 직선 거리 기준, 방향 계산 실패 시 `Final angle is not valid ... Setting to 0.0`) | 1.0 = `TRACK_DIST` (같게 유지) |
+| `RateController` | 위 계산을 4Hz로 제한 | 측정(8Hz)보다 느리게 → planner 부하 절반 |
+| `KeepRunningUntilFailure` + `FollowPath` | 잘린 경로 끝에 도착(SUCCESS)해도 끝내지 않고 다시 실행 → 새 경로가 오면 바로 따라감. 도착 판정 0.1m / 0.25rad | action이 **성공으로 끝나지 않음** → mission이 `cancelTask()`로 끝냄 |
+
+**기본 BT(`navigate_to_pose_w_replanning_and_recovery.xml`, NAVIGATE에서 사용)와 비교**
+
+| | 기본 BT (NAVIGATE) | follow_car.xml (TRACK) |
+|---|---|---|
+| goal | action goal 고정 | `goal_update` 토픽으로 계속 바뀜 |
+| 재계획 | 1Hz | 4Hz |
+| 도착 시 | SUCCESS로 action 종료 | 계속 RUNNING (멈춰서 대기, 차가 움직이면 다시 출발) |
+| 멈추는 위치 | goal pose 자체 (mission이 차 앞 지점을 계산해 넣음) | 경로 끝에서 1.0m 잘라낸 점, 차를 바라봄 |
+| 복구 동작 | `RecoveryNode` 6회: costmap 비우기, Spin, Wait, BackUp(0.3m 후진) | **없음** → 경로 계산/추종 실패 시 action 바로 실패 |
+| 다른 BT goal로 선점 | 거부됨 (같은 BT끼리만) → mission이 먼저 `cancelTask()` | 〃 |
+
+**상황별 동작**
+
+| 상황 | mission | Nav2 (follow BT) | 로봇 |
+|---|---|---|---|
+| bbox는 있는데 depth/TF 무효 | 발행 안 함 (`last_seen`은 갱신) | `GoalUpdater`가 마지막 차 위치 유지, 4Hz 재계산 | 마지막으로 본 차 위치 1.0m 앞으로 계속 |
+| 감지 안 됨 0.7s 미만 | 발행 안 함 | 〃 | 〃 (도착했으면 대기) |
+| 감지 안 됨 0.7s 이상 (`LOST_SEC`) | `cancelTask()` → FIND | action 취소, goal 사라짐 | 멈춤 → 제자리 회전 |
+| FIND → TRACK 재진입 | `cancelTask()` + 새 action (현재 차 pose) | 이전 세션의 저장 goal은 stamp가 오래되어 무시 | 새 차 위치로 |
+| 경로 계산/추종 실패 (예: 차가 라이다에 잡혀 goal 주변이 막힘) | 1s 안에 `isTaskComplete()`로 감지 → `follow action 종료(실패): 다시 시작` | action FAILED (복구 동작 없음) | 잠깐 멈췄다가 새 action으로 재시작 |
+
 ## 6. FIND
 
 - 마지막으로 본 bbox가 화면 왼쪽이면 왼쪽(+)으로, 오른쪽이면 오른쪽으로 `FIND_ANG` 0.3 rad/s 제자리 회전 (cmd_vel).
