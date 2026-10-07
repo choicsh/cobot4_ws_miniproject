@@ -97,7 +97,7 @@ stateDiagram-v2
     NAVIGATE --> NAVIGATING: goToPose(visible_goal 또는 approach_goal)
     NAVIGATING --> TRACK: robot cam car 5/10
     NAVIGATING --> FIND: isTaskComplete() and 안 보임
-    TRACK --> TRACK: 차 0.1m 이상 이동 시 goToPose 재전송
+    TRACK --> TRACK: 유효 프레임마다 goToPose 재전송
     TRACK --> FIND: LOST_SEC 0.7s 안 보임, cancelTask()
     FIND --> TRACK: robot cam car 5/10, cmd_vel 0
     FIND --> WAIT_CAR: FIND_SEC 경과, cmd_vel 0
@@ -113,7 +113,7 @@ stateDiagram-v2
 | TRACK | 로봇 rgb + depth + K + TF | **Nav2** (카메라 TF 좌표 goal) | 0.7s 못 봄 → FIND |
 | FIND | 로봇 rgb | **cmd_vel** 제자리 회전 `FIND_ANG * last_dir` | car 5/10 → TRACK, `FIND_SEC` → WAIT_CAR |
 
-상태가 바뀔 때마다 `set_state()`가 `webcam_win`, `robot_win`, `goal_car`를 비운다.
+상태가 바뀔 때마다 `set_state()`가 `webcam_win`, `robot_win`을 비운다.
 
 ## 4. 데이터 흐름 (자료형)
 
@@ -160,12 +160,10 @@ flowchart TD
     P --> PS["geometry_msgs/PointStamped<br/>point.x/y/z: float64"]
     PS --> T["do_transform_point(pt, tf).point<br/>car_xy: tuple[float,float] map [m]"]
     TF0 --> CAM["tf.transform.translation<br/>cam_xy: tuple[float,float] map [m]"]
-    T --> RG{"goal_car is None<br/>or dist(car_xy, goal_car) >= REGOAL_DIST 0.1m ?"}
-    RG -- no --> SKIP
-    RG -- yes --> AG["approach_goal(cam_xy, car_xy, TRACK_DIST 1.0)<br/>-> (x: float, y: float [m], yaw: float [rad])"]
+    T --> AG["approach_goal(cam_xy, car_xy, TRACK_DIST 1.0)<br/>-> (x: float, y: float [m], yaw: float [rad])"]
     CAM --> AG
     AG --> PO["nav.getPoseStamped([x,y], degrees(yaw))<br/>geometry_msgs/PoseStamped, frame 'map'<br/>orientation z=sin(yaw/2), w=cos(yaw/2)"]
-    PO --> GO["nav.goToPose(pose)<br/>nav2_msgs/action/NavigateToPose<br/>goal_car = car_xy"]
+    PO --> GO["nav.goToPose(pose)<br/>nav2_msgs/action/NavigateToPose<br/>유효 프레임마다 (~8Hz)"]
 ```
 
 ### 4.4 기타 변환
@@ -200,8 +198,8 @@ sequenceDiagram
             M->>N: isTaskComplete() (최대 0.10s blocking)
         else TRACK
             M->>M: robot_frame() + car_in_map()
-            opt 차 0.1m 이상 이동
-                M->>N: goToPose() (수락까지 blocking)
+            opt depth/TF 유효
+                M->>N: goToPose() (수락까지 blocking, 프레임마다)
             end
         else FIND
             M->>M: robot_frame() + publish(cmd_vel)
@@ -250,7 +248,6 @@ flowchart LR
 | `pose_set` | `bool` | | `do_undock` | `do_localize` 로그 | 초기 위치를 mission이 줬는지 |
 | `map` | `tuple[np.ndarray int8 (h,w), float, (float, float)] \| None` | cell, m/cell, m | `map_callback` | `do_navigate` | 정적 지도 (grid, res, origin) |
 | `car_xy` | `np.ndarray float64 (2,) \| None` | m (map) | `do_wait_car` | `do_navigate`, `do_navigating` 로그 | webcam 기준 차 위치 |
-| `goal_car` | `tuple[float,float] \| None` | m (map) | `do_track`, `set_state` (None) | `do_track` | 마지막 goal 보낼 때의 차 위치 |
 | `webcam_win` | `deque[np.ndarray \| None]` (maxlen 10) | m | `do_wait_car` | `do_wait_car` | K-of-N |
 | `robot_win` | `deque[list[float] \| None]` (maxlen 10) | px | `robot_frame` | `robot_seen` | K-of-N |
 | `raw_dist` | `float` | m | `box_depth` | `do_track` 로그 | stamp 검사 전 depth |
@@ -276,7 +273,6 @@ flowchart LR
 | `VIS_STEP_DEG` | 15 | deg | visible_goal 후보 간격 | O |
 | `VIS_CLEARANCE` | 0.3 | m | visible_goal 후보 주변 벽/unknown 금지 반경 (로봇 반경 0.19 + 여유) | O |
 | `TRACK_DIST` | 1.0 | m | TRACK goal을 차(가까운 표면) 앞 몇 m에 둘지, VIS_RADII 첫 반경. 카메라 0.8m 안쪽은 차가 잘림 | O |
-| `REGOAL_DIST` | 0.1 | m | TRACK goal 재전송 임계 이동량. nav2 `xy_goal_tolerance`(0.1)와 맞춤 | O |
 | `LOST_SEC` | 0.7 | s | 못 보면 FIND | O |
 | `MAX_DEPTH_MM` | 4000 | mm | TRACK depth ROI에서 이 이상(먼 벽/배경) 제외 | O |
 | `SYNC_SLOP` | 0.05 | s | rgb-depth 짝 맞춤 허용 stamp 차이 (실측 짝 차이 ≤ 31ms) | |

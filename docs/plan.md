@@ -62,7 +62,7 @@ FIND      -> 마지막으로 본 방향으로 제자리 회전, T초 안에 다�
   - depth는 bbox 중앙 영역 depth의 median (0과 `MAX_DEPTH_MM` 4m 이상(먼 벽/배경)은 제외). 바닥 평면 필터는 넣지 않음: ROI가 bbox 중앙 1/3이라 차가 45°로 서 있어도 바닥이 거의 들어오지 않음
   - bbox 중심 (u, v)와 depth z를 `oakd/stereo/camera_info`의 K로 역투영: `X=(u-cx)z/fx, Y=(v-cy)z/fy, Z=z` (camera optical frame, frame_id는 depth 메시지 header)
   - `tf_buffer.lookup_transform_full('map', 최신, frame, rgb stamp, 'odom')` 한 번으로 차 map 좌표(`do_transform_point`)와 카메라 map 위치(translation)를 같이 얻는다
-  - `approach_goal(카메라 위치, 차 위치, TRACK_DIST=1.0m)`로 goal을 만들어 `goToPose`. 차가 직전 goal 기준에서 `REGOAL_DIST`(0.1m) 이상 움직였을 때만 다시 보낸다 (새 goal이 이전 goal을 대체)
+  - `approach_goal(카메라 위치, 차 위치, TRACK_DIST=1.0m)`로 goal을 만들어 `goToPose`. 유효 프레임마다(짝 기준 ~8Hz) 보낸다 (새 goal이 이전 goal을 대체). 예전 `REGOAL_DIST`(0.1m) 기준은 차가 멈춰 있어도 좌표 5~10cm 흔들림에 걸리고 움직일 때는 0.1~0.3s 간격이라 의미가 없어 제거
   - Nav2 `xy_goal_tolerance`를 0.25 → 0.1로 낮춘 `config/nav2.yaml`을 쓴다. 0.25면 10cm 옮긴 goal이 바로 도착 처리되어 로봇이 움직이지 않는다
   - TF 시각은 bbox를 만든 **rgb가 찍힌 시각**. 최신 TF(`Time()`)를 썼을 때 회전 중 영상 지연(0.2~0.4s)만큼 차 좌표가 좌우로 ±40cm 튀어, 가짜 이동 → goal 재전송 → 회전이 반복됐다 (실측). 과거 시각이라 TF가 버퍼에 있어 `spin_once` 루프에서도 대기 없이 조회된다. 없으면(extrapolation) 그 프레임은 건너뜀
   - 단 `map ← odom`은 **최신 값**. amcl이 scan을 버리며(scan 7.4Hz, map→odom 2.8Hz) 수 초씩 발행을 멈춰 rgb 시각의 체인 조회가 extrapolation으로 실패했다 (실측 3.4s). map→odom은 천천히 변하는 보정값이라 최신 값으로 충분하고, 빠르게 변하는 odom ← 카메라만 rgb 시각으로 조회한다 (`fixed_frame='odom'`)
@@ -77,7 +77,7 @@ FIND      -> 마지막으로 본 방향으로 제자리 회전, T초 안에 다�
 - 감지 판정은 슬라이딩 윈도우(K-of-N): webcam 7/10, 로봇 카메라(NAVIGATING/FIND → TRACK) 5/10. 상태가 바뀌면 윈도우를 비운다.
 - TRACK에서 depth 무효(유효 픽셀 없음), camera_info 없음, TF 실패인 프레임은 건너뛰고 진행 중인 goal을 유지한다.
 - FIND에 들어갈 때 `navigator.cancelTask()`를 호출한다. TRACK의 Nav2 goal과 FIND의 cmd_vel 회전이 겹치지 않게 하기 위해서다.
-- 조정 값(`APPROACH_DIST`, `TRACK_DIST`, `REGOAL_DIST`, conf, N, T)은 파일 상단 상수 또는 ros2 파라미터로 둔다. 실제 로봇에서 튜닝해야 한다.
+- 조정 값(`APPROACH_DIST`, `TRACK_DIST`, conf, N, T)은 파일 상단 상수 또는 ros2 파라미터로 둔다. 실제 로봇에서 튜닝해야 한다.
 
 ## webcam 위치 매핑 (webcam 픽셀 → map 좌표)
 
@@ -140,7 +140,7 @@ webcam은 맵 바깥 회색(unknown) 영역에 고정되어 맵 안쪽 바닥을
 | 1.5 | `ros2 run mini_project webcam_calib`로 H 생성 → `~/maps/webcam_H.npy` | 재투영 오차 10cm 이하. 다른 위치에 로봇을 세웠을 때 변환 좌표와 amcl_pose 차이가 15cm 이하 (H가 있으면 클릭할 때 오차가 출력됨) | H 생성 완료 (2026-10-06). 검증점 15cm 확인 필요 |
 | 2 | `mission.py`: WAIT_CAR → UNDOCK → NAVIGATE(ING) | 차를 바닥에 놓으면 로봇이 차 앞으로 가서 차를 바라봄 | 코드 완료, 실기 확인 필요 |
 | 3 | `mission.py` TRACK 좌표: `stereo/camera_info`가 704x704인지, depth `frame_id` 확인 (시작 로그 `camera_info WxH, frame ...`) 후 TRACK 로그의 `car map (x, y)`가 rviz에서 실제 차 위치와 맞는지 | 오차 15cm 이하 | 코드 완료, 실기 확인 필요 |
-| 4 | `mission.py` TRACK goToPose (`TRACK_DIST` = 1.0m, `REGOAL_DIST` = 0.1m, nav2 `xy_goal_tolerance` = 0.1m) | 차를 10cm 이상 옮기면 로봇이 차 앞 1.0m로 다시 가서 차를 바라봄. goal 근처에서 왔다 갔다 하지 않음 | 코드 완료, 실기 확인 필요 |
+| 4 | `mission.py` TRACK goToPose (`TRACK_DIST` = 1.0m, 프레임마다 goal, nav2 `xy_goal_tolerance` = 0.1m) | 차를 옮기면 로봇이 차 앞 1.0m로 따라가서 차를 바라봄. goal 근처에서 왔다 갔다 하지 않음 | 코드 완료, 실기 확인 필요 |
 | 5 | `mission.py` FIND: 마지막으로 본 방향으로 회전. 한 바퀴(`FIND_SEC`) 돌아도 없으면 WAIT_CAR로 돌아가 webcam으로 위치를 다시 잡음 | 차를 가리면 회전하고, 다시 보이면 TRACK | 코드 완료, 실기 확인 필요 |
 | 6 | 통합 테스트 + 파라미터 튜닝, 시연 bag 녹화 (`record_bag.py`) | 처음부터 끝까지 3회 연속 성공 | |
 

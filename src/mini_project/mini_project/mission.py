@@ -40,8 +40,6 @@ TRACK_DIST = 1.0          # TRACK: 차(가까운 표면) 앞 몇 m를 GOAL로. �
 VIS_RADII = (TRACK_DIST, 0.8, 0.6, 0.4)  # NAVIGATE: 차 주위 후보 원 반경, 먼 것부터 (m). 0.4 = 로봇 반경 + 차 반폭 + 여유
 VIS_STEP_DEG = 15         # NAVIGATE: 후보 원 위 간격 (deg)
 VIS_CLEARANCE = 0.3       # NAVIGATE: 후보 주변 이 반경(m) 안에 벽/unknown 있으면 제외 (로봇 반경 0.19 + 여유)
-REGOAL_DIST = 0.1         # TRACK: 차 map 좌표가 직전 goal 기준보다 이만큼 움직이면 goal 다시 보냄 (m)
-#                           Nav2 xy_goal_tolerance(config/nav2.yaml 0.1)보다 작으면 새 goal이 바로 도착 처리됨
 LOST_SEC = 0.7            # 이 시간 동안 안 보이면 FIND
 MAX_DEPTH_MM = 4000        # TRACK depth: 이 거리 이상(먼 벽/배경) 픽셀은 ROI median에서 제외 (mm)
 SYNC_SLOP = 0.05          # rgb-depth 짝 맞춤 허용 stamp 차이 (s). 실측: depth마다 rgb가 10.6ms 차이로 존재
@@ -161,7 +159,6 @@ class Mission:
         self.pose_set = False  # mission이 초기 위치를 직접 설정했는지
         self.car_xy = None
         self.map = None  # (grid (h,w) int8, res, (origin x, y)) from map_server
-        self.goal_car = None  # TRACK: 마지막 goal을 보낼 때의 차 map 좌표
         self.webcam_win = deque(maxlen=WEBCAM_N)  # 프레임마다 car map 좌표 또는 None
         self.robot_win = deque(maxlen=ROBOT_N)    # 프레임마다 car bbox 또는 None
         self.raw_dist = 0.0
@@ -199,7 +196,6 @@ class Mission:
         # 이전 상태의 감지 기록이 다음 상태 판정에 섞이지 않도록
         self.webcam_win.clear()
         self.robot_win.clear()
-        self.goal_car = None  # TRACK에 들어오면 첫 유효 좌표로 바로 goal
 
     def publish(self, lin, ang):
         msg = TwistStamped()
@@ -355,15 +351,12 @@ class Mission:
         if r is None:
             return  # depth/TF 무효 프레임은 건너뜀 (기존 goal 유지)
         cam_xy, car_xy = r
-        self.nav.get_logger().info(
-            f'TRACK depth {self.raw_dist:.2f} m | car map ({car_xy[0]:.2f}, {car_xy[1]:.2f})',
-            throttle_duration_sec=0.5)
-        if self.goal_car is not None and math.dist(car_xy, self.goal_car) < REGOAL_DIST:
-            return
+        # 유효 프레임마다 goal 전송 (짝 기준 ~8Hz). 새 goal이 이전 goal을 대체
         x, y, yaw = approach_goal(cam_xy, car_xy, TRACK_DIST)
-        self.nav.info(f'TRACK goal ({x:.2f}, {y:.2f}, {math.degrees(yaw):.0f} deg)')
+        self.nav.get_logger().info(
+            f'TRACK depth {self.raw_dist:.2f} m | car map ({car_xy[0]:.2f}, {car_xy[1]:.2f}) | '
+            f'goal ({x:.2f}, {y:.2f}, {math.degrees(yaw):.0f} deg)', throttle_duration_sec=0.5)
         self.nav.goToPose(self.nav.getPoseStamped([x, y], math.degrees(yaw)))
-        self.goal_car = car_xy
 
     def do_find(self):
         f = self.robot_frame()
