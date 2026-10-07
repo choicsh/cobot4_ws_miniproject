@@ -148,6 +148,7 @@ class Mission:
         self.webcam.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # WAIT_CAR 재진입 시 오래된 프레임 방지
         self.webcam_model = YOLO(WEBCAM_MODEL)
         self.robot_model = YOLO(ROBOT_MODEL)
+        self.robot_model(np.zeros((704, 704, 3), np.uint8), verbose=False)  # 첫 추론(GPU 초기화)을 미리: NAVIGATING 첫 프레임 지연 방지
         self.tf_buffer = Buffer()
         # 전용 내부 노드 + 스레드로 TF 수신: 메인 루프(spin_once 1회 1콜백, YOLO 사이)에서 받으면 버퍼가 늦게 쌓여
         # rgb 시각 조회가 extrapolation으로 자주 실패함 (실측). /tf -> /robot5/tf remap은 main()의 전역 인자로 적용
@@ -161,6 +162,7 @@ class Mission:
         self.robot_xy = None
         self.amcl_fresh = False  # 마지막 undock 이후 amcl_pose를 받았는지
         self.localized = False
+        self.nav2_ready = False
         self.pose_set = False  # mission이 초기 위치를 직접 설정했는지
         self.car_xy = None
         self.map = None  # (grid (h,w) int8, res, (origin x, y)) from map_server
@@ -317,7 +319,14 @@ class Mission:
             rclpy.spin_once(self.nav, timeout_sec=1.0)
             return
         # amcl_pose를 받은 뒤에 호출해야 (0,0) 초기화를 하지 않음
-        self.nav.waitUntilNav2Active()
+        if not self.nav2_ready:
+            self.nav.waitUntilNav2Active()
+            self.nav2_ready = True
+        # 로봇 카메라(rgb-depth 짝 + camera_info)가 들어온 뒤 출발. discovery로 OAK-D 토픽 연결이 20~50s 이상 늦어
+        # 카메라 없이 NAVIGATING을 끝내는 일이 있었음 (실측)
+        if self.depth_mm is None or self.K is None:
+            self.nav.get_logger().info('Waiting for robot camera (OAK-D 토픽 연결 중)', throttle_duration_sec=2.0)
+            return
         self.localized = True
         self.set_state('NAVIGATE')
 
@@ -481,9 +490,15 @@ def selftest():
     m.do_undock()
     assert calls == ['undock', (UNDOCKED_POSE[:2], UNDOCKED_POSE[2])] and m.state == 'LOCALIZE'
     assert not m.amcl_fresh
-    m.amcl_fresh = True  # 라이다가 돌고 amcl_pose 도착
+    m.amcl_fresh, m.nav2_ready = True, False  # 라이다가 돌고 amcl_pose 도착
+    m.depth_mm, m.K = None, None  # 로봇 카메라 아직 연결 안 됨
+    m.nav.get_logger = lambda: SimpleNamespace(info=lambda *a, **k: None)
     m.do_localize()
-    assert calls[-1] == 'nav2' and m.localized and m.state == 'NAVIGATE'
+    m.do_localize()
+    assert calls.count('nav2') == 1 and not m.localized and m.state == 'LOCALIZE'  # Nav2는 한 번만 확인, 카메라 대기
+    m.depth_mm, m.K = np.zeros((704, 704), np.uint16), K  # 카메라 들어옴
+    m.do_localize()
+    assert calls.count('nav2') == 1 and m.localized and m.state == 'NAVIGATE'
     print('selftest ok')
 
 

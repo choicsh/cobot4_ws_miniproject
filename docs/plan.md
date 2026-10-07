@@ -52,7 +52,7 @@ webcam car detection ──(실패)──┐
 ```
 WAIT_CAR  -> webcam 프레임마다 YOLO, 'car' conf>=0.5가 최근 10프레임 중 7개 이상이면 다음 단계
 UNDOCK    -> navigator.undock() 후 UNDOCKED_POSE로 초기 위치 설정 (도크에서는 라이다 꺼짐)
-LOCALIZE  -> 새 amcl_pose 수신 후 waitUntilNav2Active()
+LOCALIZE  -> 새 amcl_pose 수신 후 waitUntilNav2Active(), 로봇 카메라(rgb-depth 짝 + camera_info)가 들어올 때까지 대기
 NAVIGATE  -> 지도에서 차가 보이는 지점(visible_goal, 없으면 직선 위 APPROACH_DIST)을 goToPose, NAVIGATING에서 완료 대기
 TRACK     -> 로봇 카메라 YOLO bbox + depth → 카메라 TF로 차 map 좌표 → follow action(follow_car.xml) 1회 + goal_update 토픽
 FIND      -> 마지막으로 본 방향으로 제자리 회전, T초 안에 다시 보이면 TRACK

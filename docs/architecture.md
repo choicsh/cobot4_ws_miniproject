@@ -95,7 +95,7 @@ stateDiagram-v2
     WAIT_CAR --> NAVIGATE: webcam car 7/10 and localized
     UNDOCK --> LOCALIZE: undock 완료, setInitialPose(UNDOCKED_POSE)
     LOCALIZE --> LOCALIZE: amcl_pose 대기
-    LOCALIZE --> NAVIGATE: 새 amcl_pose, waitUntilNav2Active()
+    LOCALIZE --> NAVIGATE: 새 amcl_pose, waitUntilNav2Active(), 로봇 카메라 수신
     NAVIGATE --> NAVIGATING: goToPose(visible_goal 또는 approach_goal)
     NAVIGATING --> TRACK: robot cam car 5/10
     NAVIGATING --> FIND: isTaskComplete() and 안 보임
@@ -109,7 +109,7 @@ stateDiagram-v2
 |---|---|---|---|
 | WAIT_CAR | webcam 프레임 | 없음 | `webcam_win`에서 car 7/10 → `car_xy` = median |
 | UNDOCK | `dock_status` | Create3 undock action | 항상 LOCALIZE (도킹 아니면 경고 후 건너뜀) |
-| LOCALIZE | `amcl_pose` | 없음 | `amcl_fresh` 후 `waitUntilNav2Active()` |
+| LOCALIZE | `amcl_pose`, 로봇 카메라 | 없음 | `amcl_fresh` 후 `waitUntilNav2Active()`(1회, `nav2_ready`), 이어서 `depth_mm`·`K` 수신까지 대기 |
 | NAVIGATE | `robot_xy`, `car_xy` | (goal 1회 전송) | 즉시 NAVIGATING |
 | NAVIGATING | 로봇 rgb | **Nav2** (webcam 좌표 goal) | car 5/10 → TRACK, task 완료 → FIND |
 | TRACK | 로봇 rgb + depth + K + TF | **Nav2** (카메라 TF 좌표 goal) | 0.7s 못 봄 → FIND |

@@ -9,7 +9,7 @@
 ```mermaid
 flowchart TD
     W["WAIT_CAR<br/>고정 webcam YOLO<br/>7/10 감지 → 차 map 좌표"] --> U["UNDOCK<br/>+ 초기 위치 (0,0,180°)"]
-    U --> L["LOCALIZE<br/>amcl_pose → Nav2 active"]
+    U --> L["LOCALIZE<br/>amcl_pose → Nav2 active<br/>→ 로봇 카메라 수신"]
     L --> N["NAVIGATE<br/>지도에서 차가 보이는 지점<br/>(visible_goal)으로 goToPose"]
     N -->|"로봇 카메라 5/10 감지"| T["TRACK<br/>bbox + depth + TF → 차 map 좌표<br/>Nav2 follow BT로 1.0m 유지"]
     N -->|"도착했는데 안 보임"| F["FIND<br/>마지막 본 방향으로 제자리 회전"]
@@ -170,6 +170,8 @@ flowchart TD
 | ⑦ | 차를 봤는데 webcam goal로 계속 감 | BT가 다른 goal은 bt_navigator가 **선점 거부** (`Preemption request was rejected ... BT XML file is not the same`) | follow 전에 `cancelTask()` |
 | ⑧ | global costmap이 안 뜸 | 도크 위라 `map` TF 없음 → global costmap이 **60s** 기다리다 활성화 실패 → bringup 중단 | nav2는 `Undocking...` 시점에 실행 (또는 `initial_transform_timeout` 상향, 미적용) |
 | ⑨ | Ctrl+C 후 정지/goal 취소 안 됨 | rclpy가 SIGINT에 context를 먼저 닫음 | `SignalHandlerOptions.NO` |
+| ⑩ | NAVIGATING 21s 동안 차를 못 봄, 카메라 창이 늦게 뜸 | OAK-D 토픽 연결(discovery)이 mission 시작 후 **20~50s 이상** 걸려, 카메라 없이 주행 (실측: NAVIGATING 시작 14s 뒤 첫 camera_info, 한 실행은 끝까지 미수신) | LOCALIZE에서 rgb-depth 짝 + camera_info 수신까지 대기 |
+| ⑪ | NAVIGATING 첫 프레임 지연 | 로봇 YOLO 첫 추론 1,274ms (이후 5ms, GPU 초기화) | 시작 시 빈 이미지로 미리 추론 |
 
 ## 8. 성능
 
@@ -208,4 +210,4 @@ follow BT(⑥⑦) 적용 후 실기 값은 아직 없다. 다음 실행 후 `tra
 - **WiFi 부하**: rgb 26Hz 중 ~8Hz만 쓰는데 전부 전송 → amcl scan 지연과 연관 의심. OAK-D `rgb.i_fps` 30 → 10 검토 (로봇 yaml).
 - **goal이 차 위치 자체**: 차가 라이다에 잡히면 goal이 장애물 안 → NavFn `tolerance 0.5`로 근처까지 계획되어 더 멀리 멈출 수 있다.
 - **nav2 실행 순서**: 도크 위에서 먼저 띄우려면 global costmap `initial_transform_timeout`을 600s로 (⑧).
-- **NAVIGATING 중 감지 실패 원인 미상**: 21s 동안 5/10을 못 채운 실행이 있었다 → 감지 횟수 로그 추가 검토.
+- **OAK-D 토픽 연결 지연(20~50s+)**: ⑩으로 카메라 없이 출발하지는 않지만 출발이 그만큼 늦다. discovery server 설정 조사 필요.
